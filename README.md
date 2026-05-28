@@ -2,7 +2,7 @@
 
 A Chromium MV3 extension that aggressively trims memory, GPU, and network overhead so a Raspberry Pi (or any low-spec box) can browse the modern web without melting.
 
-Measured on a real Pi 4 (4 cores, 8 GB RAM, Chromium 148, identical browsing session):
+Measured on a real Pi 5 (4 cores, 8 GB RAM, Chromium 148, identical browsing session):
 
 | Process | Without Potatofy | With Potatofy | Δ |
 |---|---:|---:|---:|
