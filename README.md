@@ -18,7 +18,7 @@ Source traces are not committed; the methodology is `chrome://tracing` memory-in
 ## Install (unpacked)
 
 ```
-1. git clone <this repo>
+1. git clone https://github.com/Funnykid7/Potatofy-extension
 2. Open chrome://extensions
 3. Toggle "Developer mode" (top-right)
 4. Click "Load unpacked" and select the cloned directory
