@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Potatofy</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="header">
+    <img class="logo" src="../icons/icon48.png" alt="Potatofy">
+    <div class="title">
+      <h1>Potatofy</h1>
+      <p class="subtitle">Low-end browsing, supercharged</p>
+    </div>
+  </header>
+
+  <section class="stats" id="stats-section">
+    <div class="stats-head">
+      <span class="stats-title">Savings</span>
+      <select id="stats-scope" class="stats-scope">
+        <option value="session">this session</option>
+        <option value="lifetime">all-time</option>
+      </select>
+    </div>
+    <div class="stats-grid">
+      <div class="stat-row stat-row--lead">
+        <span class="stat-label">RAM saved</span>
+        <span class="stat-value" id="stat-ram">—</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Bandwidth saved</span>
+        <span class="stat-value" id="stat-bw">—</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Time saved</span>
+        <span class="stat-value" id="stat-cpu">—</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Requests blocked</span>
+        <span class="stat-value" id="stat-req">—</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Tabs discarded</span>
+        <span class="stat-value" id="stat-tabs">—</span>
+      </div>
+    </div>
+    <button id="stats-reset" class="stats-reset" type="button">Reset</button>
+    <p class="stats-foot">Numbers are heuristic estimates based on block counts.</p>
+  </section>
+
+  <section class="toggles">
+    <div class="toggle-row">
+      <div class="toggle-text">
+        <label for="toggle-blocking">Block Trackers &amp; Ads</label>
+        <p>Drops analytics, ads, fonts and autoplay media at the network layer.</p>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="toggle-blocking">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="toggle-row toggle-row--expand">
+      <div class="toggle-text">
+        <label for="toggle-suspend">Auto-Suspend Idle Tabs</label>
+        <p>Discards tabs after the chosen idle time. Also auto-discards on low memory.</p>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="toggle-suspend">
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div class="suspend-controls">
+      <label class="threshold-row">
+        <span>Discard after</span>
+        <select id="idle-threshold" class="threshold-select">
+          <option value="1">1 min</option>
+          <option value="3">3 min</option>
+          <option value="5">5 min</option>
+          <option value="10">10 min</option>
+          <option value="15">15 min</option>
+          <option value="30">30 min</option>
+        </select>
+      </label>
+      <button id="discard-now-btn" class="discard-now-btn" type="button">Discard idle tabs now</button>
+    </div>
+
+    <div class="toggle-row">
+      <div class="toggle-text">
+        <label for="toggle-throttle">Throttle Background JS</label>
+        <p>Stops timers, intervals and animations on hidden tabs.</p>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="toggle-throttle">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="toggle-row">
+      <div class="toggle-text">
+        <label for="toggle-image">Image Lite Mode</label>
+        <p>Forces lazy-loading and drops <code>srcset</code> for lighter image weight.</p>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="toggle-image">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="toggle-row">
+      <div class="toggle-text">
+        <label for="toggle-animation">Kill CSS Animations</label>
+        <p>Disables animations and transitions site-wide to ease GPU load.</p>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="toggle-animation">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="toggle-row">
+      <div class="toggle-text">
+        <label for="toggle-prefetch">Strip Prefetch Hints</label>
+        <p>Removes <code>preload</code>, <code>prefetch</code>, <code>preconnect</code>, <code>dns-prefetch</code>.</p>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="toggle-prefetch">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="toggle-row">
+      <div class="toggle-text">
+        <label for="toggle-video">Pause Background Videos</label>
+        <p>Pauses <code>&lt;video&gt;</code> elements on hidden tabs to free decoder memory.</p>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="toggle-video">
+        <span class="slider"></span>
+      </label>
+    </div>
+  </section>
+
+  <section class="whitelist">
+    <div class="current-site">
+      <span class="label">Current site</span>
+      <span id="current-hostname" class="hostname">—</span>
+    </div>
+    <button id="whitelist-btn" class="whitelist-btn" disabled>Whitelist This Site</button>
+
+    <details class="whitelist-list-wrap">
+      <summary>Whitelisted sites (<span id="whitelist-count">0</span>)</summary>
+      <ul id="whitelist-list" class="whitelist-list"></ul>
+    </details>
+  </section>
+
+  <script src="popup.js"></script>
+</body>
+</html>

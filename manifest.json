@@ -1,0 +1,59 @@
+{
+  "manifest_version": 3,
+  "name": "Potatofy",
+  "version": "1.0.1",
+  "description": "Aggressively optimizes browsing for Raspberry Pi and low-end hardware: blocks trackers, ads, fonts, autoplay media; suspends idle tabs; throttles background JS.",
+  "permissions": [
+    "tabs",
+    "storage",
+    "alarms",
+    "declarativeNetRequest",
+    "declarativeNetRequestFeedback",
+    "system.memory"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self';"
+  },
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "classic"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content-script.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content-script-main.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    }
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "static-blocking-rules",
+        "enabled": true,
+        "path": "rules/static-rules.json"
+      }
+    ]
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

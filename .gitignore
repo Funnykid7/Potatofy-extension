@@ -1,0 +1,34 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+npm-debug.log*
+
+# Node (if tooling ever lands)
+node_modules/
+package-lock.json
+yarn.lock
+
+# Build / packaging output
+dist/
+build/
+*.crx
+*.pem
+*.zip
+
+# Chromium internals
+_metadata/
+
+# Performance traces (large session dumps; not source)
+with*.json
+without*.json
+*.trace.json
