@@ -17,10 +17,13 @@
   <section class="stats" id="stats-section">
     <div class="stats-head">
       <span class="stats-title">Savings</span>
-      <select id="stats-scope" class="stats-scope">
-        <option value="session">this session</option>
-        <option value="lifetime">all-time</option>
-      </select>
+      <div class="stats-head-right">
+        <span class="live-chip" aria-hidden="true">Live</span>
+        <select id="stats-scope" class="stats-scope" aria-label="Stats scope">
+          <option value="session">this session</option>
+          <option value="lifetime">all-time</option>
+        </select>
+      </div>
     </div>
     <div class="stats-grid">
       <div class="stat-row stat-row--lead">
@@ -120,6 +123,17 @@
 
     <div class="toggle-row">
       <div class="toggle-text">
+        <label for="toggle-autoplay">Kill Autoplay Media</label>
+        <p>Strips <code>autoplay</code> from videos and audio so they don't start on page load.</p>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="toggle-autoplay">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="toggle-row">
+      <div class="toggle-text">
         <label for="toggle-prefetch">Strip Prefetch Hints</label>
         <p>Removes <code>preload</code>, <code>prefetch</code>, <code>preconnect</code>, <code>dns-prefetch</code>.</p>
       </div>
@@ -154,6 +168,12 @@
     </details>
   </section>
 
+  <section class="diagnostics">
+    <button id="run-tests-btn" class="run-tests-btn" type="button">Run Diagnostics</button>
+    <div id="test-results" class="test-results hidden"></div>
+  </section>
+
+  <script src="tests.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

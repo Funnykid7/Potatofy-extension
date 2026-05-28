@@ -4,6 +4,7 @@ const DEFAULTS = {
   jsThrottleEnabled: true,
   imageLiteEnabled: true,
   animationKillEnabled: true,
+  autoplayKillEnabled: true,
   prefetchStripEnabled: true,
   videoPauseEnabled: true,
   memoryPressureEnabled: true,
@@ -20,6 +21,7 @@ const els = {
   throttle:       document.getElementById('toggle-throttle'),
   image:          document.getElementById('toggle-image'),
   animation:      document.getElementById('toggle-animation'),
+  autoplay:       document.getElementById('toggle-autoplay'),
   prefetch:       document.getElementById('toggle-prefetch'),
   video:          document.getElementById('toggle-video'),
   threshold:      document.getElementById('idle-threshold'),
@@ -34,7 +36,9 @@ const els = {
   statBw:         document.getElementById('stat-bw'),
   statCpu:        document.getElementById('stat-cpu'),
   statReq:        document.getElementById('stat-req'),
-  statTabs:       document.getElementById('stat-tabs')
+  statTabs:       document.getElementById('stat-tabs'),
+  runTestsBtn:    document.getElementById('run-tests-btn'),
+  testResults:    document.getElementById('test-results')
 };
 
 let currentSettings = { ...DEFAULTS };
@@ -73,6 +77,7 @@ function renderToggles() {
   els.throttle.checked  = !!currentSettings.jsThrottleEnabled;
   els.image.checked     = !!currentSettings.imageLiteEnabled;
   els.animation.checked = !!currentSettings.animationKillEnabled;
+  els.autoplay.checked  = !!currentSettings.autoplayKillEnabled;
   els.prefetch.checked  = !!currentSettings.prefetchStripEnabled;
   els.video.checked     = !!currentSettings.videoPauseEnabled;
 
@@ -181,6 +186,7 @@ function bindToggles() {
     [els.throttle,  'jsThrottleEnabled'],
     [els.image,     'imageLiteEnabled'],
     [els.animation, 'animationKillEnabled'],
+    [els.autoplay,  'autoplayKillEnabled'],
     [els.prefetch,  'prefetchStripEnabled'],
     [els.video,     'videoPauseEnabled']
   ];
@@ -236,6 +242,68 @@ function bindWhitelistBtn() {
   });
 }
 
+function renderTestResults({ passed, failed, total, results }) {
+  const allPass = failed === 0;
+  els.testResults.replaceChildren();
+
+  const summary = document.createElement('div');
+  summary.className = 'test-summary ' + (allPass ? 'all-pass' : 'has-fail');
+  summary.textContent = allPass
+    ? `✓ All ${total} tests passed`
+    : `${passed}/${total} passed - ${failed} failed`;
+  els.testResults.appendChild(summary);
+
+  let lastSuite = null;
+  for (const r of results) {
+    if (r.suite !== lastSuite) {
+      const label = document.createElement('div');
+      label.className = 'test-suite-label';
+      label.textContent = r.suite;
+      els.testResults.appendChild(label);
+      lastSuite = r.suite;
+    }
+    const line = document.createElement('div');
+    line.className = 'test-line ' + (r.ok ? 'test-pass' : 'test-fail');
+    const icon = document.createElement('span');
+    icon.className = 'test-icon';
+    icon.textContent = r.ok ? '✓' : '✗';
+    const name = document.createElement('span');
+    name.className = 'test-name';
+    name.textContent = r.name;
+    line.appendChild(icon);
+    line.appendChild(name);
+    els.testResults.appendChild(line);
+    if (!r.ok && r.error) {
+      const err = document.createElement('span');
+      err.className = 'test-error';
+      err.textContent = r.error;
+      els.testResults.appendChild(err);
+    }
+  }
+
+  els.testResults.classList.remove('hidden');
+}
+
+function bindDiagnosticsBtn() {
+  els.runTestsBtn.addEventListener('click', async () => {
+    els.runTestsBtn.disabled = true;
+    els.runTestsBtn.textContent = 'Running…';
+    try {
+      const report = await window.runTests();
+      renderTestResults(report);
+    } catch (e) {
+      els.testResults.replaceChildren();
+      const summary = document.createElement('div');
+      summary.className = 'test-summary has-fail';
+      summary.textContent = 'Runner error: ' + (e && e.message ? e.message : String(e));
+      els.testResults.appendChild(summary);
+      els.testResults.classList.remove('hidden');
+    }
+    els.runTestsBtn.textContent = 'Run Diagnostics';
+    els.runTestsBtn.disabled = false;
+  });
+}
+
 function bindStatsControls() {
   els.statsScope.addEventListener('change', refreshStats);
   els.statsReset.addEventListener('click', async () => {
@@ -254,6 +322,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   bindSuspendControls();
   bindWhitelistBtn();
   bindStatsControls();
+  bindDiagnosticsBtn();
   startStatsPolling();
 });
 

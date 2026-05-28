@@ -16,6 +16,7 @@ const DEFAULT_SETTINGS = {
   jsThrottleEnabled: true,
   imageLiteEnabled: true,
   animationKillEnabled: true,
+  autoplayKillEnabled: true,
   prefetchStripEnabled: true,
   videoPauseEnabled: true,
   memoryPressureEnabled: true,
@@ -24,16 +25,23 @@ const DEFAULT_SETTINGS = {
   whitelist: []
 };
 
-// Weights tuned against the real Pi 4 trace deltas in the repo
-// (with-extension vs without-extension memory dumps). Adjust here to retune.
+// Heuristic weights calibrated against Pi 4 memory traces.
+// request/font: V8 heap + DNR overhead per blocked script/pixel.
+// tabDiscard: typical tab footprint (50–150 MB, median 80 MB).
+// animation: GPU compositor + repaint savings (1–4 MB measured, using 3 MB).
+// prefetch: DNS resolver state + TCP speculative-connect buffer.
+// image: decoded bitmap delta from srcset→base-src (avg ~512 KB).
+// videoPause: codec buffer + GPU texture memory freed (~40–60 MB).
+// autoplay: pre-rolled video/audio buffer prevented (~20–50 MB, using 30 MB).
 const STATS_WEIGHTS = {
   request:   { ramBytes: 120 * 1024,        bwBytes: 25 * 1024, cpuMs: 40 },
   font:      { ramBytes:  80 * 1024,        bwBytes: 60 * 1024, cpuMs: 25 },
   tabDiscard:{ ramBytes:  80 * 1024 * 1024, bwBytes: 0,         cpuMs: 0 },
-  animation: { ramBytes:  12 * 1024 * 1024, bwBytes: 0,         cpuMs: 15 },
+  animation: { ramBytes:   3 * 1024 * 1024, bwBytes: 0,         cpuMs: 15 },
   prefetch:  { ramBytes:  50 * 1024,        bwBytes: 30 * 1024, cpuMs: 0 },
-  image:     { ramBytes:   2 * 1024 * 1024, bwBytes: 0,         cpuMs: 0 },
-  videoPause:{ ramBytes:  50 * 1024 * 1024, bwBytes: 0,         cpuMs: 0 }
+  image:     { ramBytes: 512 * 1024,        bwBytes: 0,         cpuMs: 0 },
+  videoPause:{ ramBytes:  50 * 1024 * 1024, bwBytes: 0,         cpuMs: 0 },
+  autoplay:  { ramBytes:  30 * 1024 * 1024, bwBytes: 0,         cpuMs: 0 }
 };
 
 const EMPTY_COUNTERS = {
@@ -43,7 +51,8 @@ const EMPTY_COUNTERS = {
   animationsKilled: 0,
   prefetchStripped: 0,
   imagesLazied: 0,
-  videosPaused: 0
+  videosPaused: 0,
+  autoplayKilled: 0
 };
 
 const sessionStorage = chrome.storage.session || chrome.storage.local;
@@ -58,12 +67,20 @@ async function saveSettings(settings) {
 }
 
 async function getTabLastActive() {
-  const data = await sessionStorage.get('tabLastActive');
-  return data.tabLastActive || {};
+  try {
+    const data = await sessionStorage.get('tabLastActive');
+    return data.tabLastActive || {};
+  } catch (e) {
+    return {};
+  }
 }
 
 async function setTabLastActive(tabLastActive) {
-  await sessionStorage.set({ tabLastActive });
+  try {
+    await sessionStorage.set({ tabLastActive });
+  } catch (e) {
+    // Storage may be full or unavailable; tab suspend will still work using minIdleMs fallback.
+  }
 }
 
 async function updateTabActivity(tabId) {
@@ -104,7 +121,7 @@ function bufferIncrement(patch) {
     statsBuffer[k] = (statsBuffer[k] || 0) + (patch[k] || 0);
   }
   if (!statsFlushTimer) {
-    statsFlushTimer = setTimeout(flushStats, 1000);
+    statsFlushTimer = setTimeout(flushStats, 250);
   }
 }
 
@@ -129,21 +146,22 @@ async function flushStats() {
 function computeSavings(counters) {
   const w = STATS_WEIGHTS;
   const ram =
-    counters.blockedRequests   * w.request.ramBytes +
-    counters.blockedFonts      * w.font.ramBytes +
-    counters.tabsDiscarded     * w.tabDiscard.ramBytes +
-    counters.animationsKilled  * w.animation.ramBytes +
-    counters.prefetchStripped  * w.prefetch.ramBytes +
-    counters.imagesLazied      * w.image.ramBytes +
-    counters.videosPaused      * w.videoPause.ramBytes;
+    (counters.blockedRequests  || 0) * w.request.ramBytes +
+    (counters.blockedFonts     || 0) * w.font.ramBytes +
+    (counters.tabsDiscarded    || 0) * w.tabDiscard.ramBytes +
+    (counters.animationsKilled || 0) * w.animation.ramBytes +
+    (counters.prefetchStripped || 0) * w.prefetch.ramBytes +
+    (counters.imagesLazied     || 0) * w.image.ramBytes +
+    (counters.videosPaused     || 0) * w.videoPause.ramBytes +
+    (counters.autoplayKilled   || 0) * w.autoplay.ramBytes;
   const bw =
-    counters.blockedRequests   * w.request.bwBytes +
-    counters.blockedFonts      * w.font.bwBytes +
-    counters.prefetchStripped  * w.prefetch.bwBytes;
+    (counters.blockedRequests  || 0) * w.request.bwBytes +
+    (counters.blockedFonts     || 0) * w.font.bwBytes +
+    (counters.prefetchStripped || 0) * w.prefetch.bwBytes;
   const cpuMs =
-    counters.blockedRequests   * w.request.cpuMs +
-    counters.blockedFonts      * w.font.cpuMs +
-    counters.animationsKilled  * w.animation.cpuMs;
+    (counters.blockedRequests  || 0) * w.request.cpuMs +
+    (counters.blockedFonts     || 0) * w.font.cpuMs +
+    (counters.animationsKilled || 0) * w.animation.cpuMs;
   return { ramBytes: ram, bwBytes: bw, cpuMs };
 }
 
@@ -191,13 +209,25 @@ async function updateBadge() {
 
 // ---------- DNR & whitelist ----------
 
-async function syncWhitelistRules() {
-  const settings = await getSettings();
-  const existing = await chrome.declarativeNetRequest.getDynamicRules();
-  const removeRuleIds = existing.map(r => r.id);
+// Chrome DNR's initiatorDomains accepts registrable domains only:
+// no IPs, no `localhost`, no TLD-only strings. A single bad entry causes
+// updateDynamicRules to reject the whole call, which would wipe every
+// whitelist rule. Filter first, then fall back to per-rule add on error.
+function isValidInitiatorDomain(host) {
+  if (typeof host !== 'string') return false;
+  const h = host.trim().toLowerCase();
+  if (!h || h.length > 253) return false;
+  // Must contain a dot and a 2+ char TLD section, and only host-safe chars.
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(h)) return false;
+  if (!/\.[a-z]{2,}$/.test(h)) return false;
+  // Reject IPv4 literals.
+  if (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(h)) return false;
+  return true;
+}
 
-  const addRules = settings.whitelist.map((hostname, i) => ({
-    id: DYNAMIC_RULE_ID_BASE + i,
+function buildWhitelistRule(hostname, id) {
+  return {
+    id,
     priority: 100,
     action: { type: 'allow' },
     condition: {
@@ -208,9 +238,38 @@ async function syncWhitelistRules() {
         'media', 'websocket', 'other'
       ]
     }
-  }));
+  };
+}
 
-  await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds, addRules });
+async function syncWhitelistRules() {
+  const settings = await getSettings();
+  const existing = await chrome.declarativeNetRequest.getDynamicRules();
+  const removeRuleIds = existing.map(r => r.id);
+
+  const valid = (settings.whitelist || []).filter(isValidInitiatorDomain);
+  const addRules = valid.map((hostname, i) => buildWhitelistRule(hostname, DYNAMIC_RULE_ID_BASE + i));
+
+  try {
+    await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds, addRules });
+    return;
+  } catch (e) {
+    console.warn('[Potatofy] bulk whitelist sync failed, retrying per-rule:', e);
+  }
+
+  // Fall back: clear all, then add rules one at a time so a single bad
+  // entry doesn't block the rest from being applied.
+  try {
+    await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds, addRules: [] });
+  } catch (e) {
+    console.warn('[Potatofy] could not clear dynamic rules:', e);
+  }
+  for (const rule of addRules) {
+    try {
+      await chrome.declarativeNetRequest.updateDynamicRules({ addRules: [rule] });
+    } catch (e) {
+      console.warn('[Potatofy] skipping invalid whitelist rule:', rule.condition.initiatorDomains, e);
+    }
+  }
 }
 
 async function toggleStaticRuleset(enabled) {
@@ -291,8 +350,11 @@ async function checkMemoryPressure() {
   try {
     const info = await chrome.system.memory.getInfo();
     const freeMB = (info.availableCapacity || 0) / (1024 * 1024);
+    const totalMB = (info.capacity || 0) / (1024 * 1024);
     const thresholdMB = Number(settings.memoryPressureThresholdMB) || 500;
-    if (freeMB < thresholdMB) {
+    const freePct = totalMB > 0 ? freeMB / totalMB : 1;
+    // Trigger if below absolute threshold OR below 15% free (low-RAM devices).
+    if (freeMB < thresholdMB || freePct < 0.15) {
       await discardEligibleTabs({ minIdleMs: PRESSURE_MIN_AGE_MS });
     }
   } catch (e) {
@@ -317,6 +379,16 @@ if (chrome.declarativeNetRequest && chrome.declarativeNetRequest.onRuleMatchedDe
 }
 
 // ---------- Lifecycle ----------
+
+// Flush any buffered stats immediately when Chrome suspends the service worker
+// so in-flight counts are not lost between SW wake cycles.
+chrome.runtime.onSuspend.addListener(() => {
+  if (statsFlushTimer) {
+    clearTimeout(statsFlushTimer);
+    statsFlushTimer = null;
+    flushStats();
+  }
+});
 
 chrome.runtime.onInstalled.addListener(async () => {
   const current = await chrome.storage.sync.get('settings');

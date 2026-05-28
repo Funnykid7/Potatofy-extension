@@ -1,15 +1,13 @@
 (function () {
   const _setTimeout = window.setTimeout.bind(window);
   const _setInterval = window.setInterval.bind(window);
-  const _clearTimeout = window.clearTimeout.bind(window);
-  const _clearInterval = window.clearInterval.bind(window);
   const _requestAnimationFrame = (window.requestAnimationFrame || function () { return 0; }).bind(window);
-  const _cancelAnimationFrame = (window.cancelAnimationFrame || function () {}).bind(window);
 
   const settings = {
     jsThrottleEnabled: false,
     imageLiteEnabled: false,
     animationKillEnabled: false,
+    autoplayKillEnabled: false,
     prefetchStripEnabled: false,
     videoPauseEnabled: false
   };
@@ -17,7 +15,7 @@
 
   // ---------- Stats bridge (debounced, isolated-world picks this up) ----------
 
-  const statBuffer = { animationsKilled: 0, prefetchStripped: 0, imagesLazied: 0, videosPaused: 0 };
+  const statBuffer = { animationsKilled: 0, prefetchStripped: 0, imagesLazied: 0, videosPaused: 0, autoplayKilled: 0 };
   let statFlushTimer = null;
 
   function reportStat(key, n) {
@@ -31,6 +29,7 @@
       statBuffer.prefetchStripped = 0;
       statBuffer.imagesLazied = 0;
       statBuffer.videosPaused = 0;
+      statBuffer.autoplayKilled = 0;
       try {
         window.dispatchEvent(new CustomEvent('__potatofy_stat', { detail }));
       } catch (e) {
@@ -68,10 +67,7 @@
     throttleActive = false;
     window.setTimeout = _setTimeout;
     window.setInterval = _setInterval;
-    window.clearTimeout = _clearTimeout;
-    window.clearInterval = _clearInterval;
     window.requestAnimationFrame = _requestAnimationFrame;
-    window.cancelAnimationFrame = _cancelAnimationFrame;
   }
 
   function handleVisibilityChange() {
@@ -183,6 +179,7 @@
       try {
         if (!el.hasAttribute('loading')) el.setAttribute('loading', 'lazy');
         if (el.tagName === 'IMG' && !el.hasAttribute('decoding')) el.setAttribute('decoding', 'async');
+        if (el.tagName === 'IMG' && !el.hasAttribute('fetchpriority')) el.setAttribute('fetchpriority', 'low');
         if (el.tagName === 'IMG' && el.hasAttribute('srcset')) {
           el.removeAttribute('srcset');
           el.removeAttribute('sizes');
@@ -230,6 +227,38 @@
     if (count) reportStat('prefetchStripped', count);
   }
 
+  // ---------- Autoplay killer ----------
+
+  function killAutoplay(el) {
+    if (!el || el.__potatofy_autoplay_killed) return false;
+    const tag = el.tagName;
+    if (tag !== 'VIDEO' && tag !== 'AUDIO') return false;
+    try {
+      let changed = false;
+      if (el.hasAttribute('autoplay')) {
+        el.removeAttribute('autoplay');
+        changed = true;
+      }
+      // For audio, also force preload=none so the browser skips prefetching.
+      if (tag === 'AUDIO' && el.getAttribute('preload') !== 'none') {
+        el.setAttribute('preload', 'none');
+        changed = true;
+      }
+      el.__potatofy_autoplay_killed = true;
+      return changed;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function killAutoplayAll(root) {
+    if (!root || !root.querySelectorAll) return;
+    let count = 0;
+    const nodes = root.querySelectorAll('video, audio');
+    for (const n of nodes) if (killAutoplay(n)) count++;
+    if (count) reportStat('autoplayKilled', count);
+  }
+
   // ---------- Mutation observer (handles SPAs and lazy-inserted markup) ----------
 
   let observer = null;
@@ -261,6 +290,13 @@
               pauseAllVideos(node);
             }
           }
+          if (settings.autoplayKillEnabled) {
+            if (node.tagName === 'VIDEO' || node.tagName === 'AUDIO') {
+              if (killAutoplay(node)) reportStat('autoplayKilled', 1);
+            } else if (node.querySelectorAll) {
+              killAutoplayAll(node);
+            }
+          }
         }
       }
     });
@@ -275,7 +311,8 @@
   }
 
   function anyContentFeatureEnabled() {
-    return settings.imageLiteEnabled || settings.prefetchStripEnabled || settings.videoPauseEnabled;
+    return settings.imageLiteEnabled || settings.prefetchStripEnabled ||
+           settings.videoPauseEnabled || settings.autoplayKillEnabled;
   }
 
   // ---------- Apply / sync feature flags ----------
@@ -284,6 +321,7 @@
     if (settings.animationKillEnabled) applyAnimationKill(); else removeAnimationKill();
     if (settings.imageLiteEnabled) applyImageLiteAll(document);
     if (settings.prefetchStripEnabled) applyPrefetchStripAll(document);
+    if (settings.autoplayKillEnabled) killAutoplayAll(document);
     if (settings.videoPauseEnabled && isHidden()) pauseAllVideos(document);
     if (anyContentFeatureEnabled()) startObserver(); else stopObserver();
     if (settings.jsThrottleEnabled) {
@@ -297,13 +335,17 @@
     settings.jsThrottleEnabled    = !!(detail && detail.jsThrottleEnabled);
     settings.imageLiteEnabled     = !!(detail && detail.imageLiteEnabled);
     settings.animationKillEnabled = !!(detail && detail.animationKillEnabled);
+    settings.autoplayKillEnabled  = !!(detail && detail.autoplayKillEnabled);
     settings.prefetchStripEnabled = !!(detail && detail.prefetchStripEnabled);
     settings.videoPauseEnabled    = !!(detail && detail.videoPauseEnabled);
   }
 
+  // Attach visibility listener at script load time so changes are never missed,
+  // even if the init event fires after a visibility transition.
+  document.addEventListener('visibilitychange', handleVisibilityChange);
+
   window.addEventListener('__potatofy_init', (e) => {
     ingestDetail(e.detail);
-    document.addEventListener('visibilitychange', handleVisibilityChange);
     applyAll();
   });
 

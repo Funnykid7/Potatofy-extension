@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Potatofy",
-  "version": "1.0.1",
+  "version": "1.0.0",
   "description": "Aggressively optimizes browsing for Raspberry Pi and low-end hardware: blocks trackers, ads, fonts, autoplay media; suspends idle tabs; throttles background JS.",
   "permissions": [
     "tabs",
@@ -9,7 +9,8 @@
     "alarms",
     "declarativeNetRequest",
     "declarativeNetRequestFeedback",
-    "system.memory"
+    "system.memory",
+    "windows"
   ],
   "host_permissions": ["<all_urls>"],
   "content_security_policy": {

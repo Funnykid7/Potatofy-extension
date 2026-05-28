@@ -5,13 +5,14 @@
     jsThrottleEnabled: true,
     imageLiteEnabled: true,
     animationKillEnabled: true,
+    autoplayKillEnabled: true,
     prefetchStripEnabled: true,
     videoPauseEnabled: true,
     whitelist: []
   };
 
   // Stats message types accepted from the MAIN-world page bridge.
-  const STAT_KEYS = new Set(['animationsKilled', 'prefetchStripped', 'imagesLazied', 'videosPaused']);
+  const STAT_KEYS = new Set(['animationsKilled', 'prefetchStripped', 'imagesLazied', 'videosPaused', 'autoplayKilled']);
 
   function normalizeHost(h) {
     return (h || '').replace(/^www\./, '').toLowerCase();
@@ -32,6 +33,7 @@
       jsThrottleEnabled:     merged.jsThrottleEnabled    && !whitelisted,
       imageLiteEnabled:      merged.imageLiteEnabled     && !whitelisted,
       animationKillEnabled:  merged.animationKillEnabled && !whitelisted,
+      autoplayKillEnabled:   merged.autoplayKillEnabled  && !whitelisted,
       prefetchStripEnabled:  merged.prefetchStripEnabled && !whitelisted,
       videoPauseEnabled:     merged.videoPauseEnabled    && !whitelisted
     };
