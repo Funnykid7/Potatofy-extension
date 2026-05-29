@@ -1,0 +1,27 @@
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": { "type": "block" },
+    "condition": {
+      "requestDomains": [
+        "fonts.googleapis.com",
+        "fonts.gstatic.com",
+        "use.typekit.net",
+        "p.typekit.net",
+        "kit.fontawesome.com",
+        "use.fontawesome.com",
+        "ka-f.fontawesome.com",
+        "cloud.typography.com",
+        "fast.fonts.net",
+        "fonts.net",
+        "webfont.fontspring.com",
+        "f.fontdeck.com",
+        "use.edgefonts.net",
+        "cdn.jsdelivr.net",
+        "cdnjs.cloudflare.com"
+      ],
+      "resourceTypes": ["font", "stylesheet"]
+    }
+  }
+]

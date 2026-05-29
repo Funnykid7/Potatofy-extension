@@ -1,12 +1,14 @@
 {
   "manifest_version": 3,
   "name": "Potatofy",
-  "version": "1.0.0",
-  "description": "Aggressively optimizes browsing for Raspberry Pi and low-end hardware: blocks trackers, ads, fonts, autoplay media; suspends idle tabs; throttles background JS.",
+  "version": "1.1.1",
+  "description": "Aggressively optimizes browsing for Raspberry Pi and low-end hardware: blocks trackers/ads/fonts/3rd-party scripts, suspends idle tabs, throttles background JS, kills bloat on heavy sites.",
   "permissions": [
     "tabs",
     "storage",
     "alarms",
+    "scripting",
+    "contentSettings",
     "declarativeNetRequest",
     "declarativeNetRequestFeedback",
     "system.memory",
@@ -18,7 +20,7 @@
   },
   "background": {
     "service_worker": "service-worker.js",
-    "type": "classic"
+    "type": "module"
   },
   "content_scripts": [
     {
@@ -41,6 +43,11 @@
         "id": "static-blocking-rules",
         "enabled": true,
         "path": "rules/static-rules.json"
+      },
+      {
+        "id": "font-blocking-rules",
+        "enabled": true,
+        "path": "rules/font-rules.json"
       }
     ]
   },

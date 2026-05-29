@@ -6,174 +6,271 @@
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-  <header class="header">
-    <img class="logo" src="../icons/icon48.png" alt="Potatofy">
-    <div class="title">
-      <h1>Potatofy</h1>
-      <p class="subtitle">Low-end browsing, supercharged</p>
-    </div>
-  </header>
+  <div class="popup">
 
-  <section class="stats" id="stats-section">
-    <div class="stats-head">
-      <span class="stats-title">Savings</span>
-      <div class="stats-head-right">
-        <span class="live-chip" aria-hidden="true">Live</span>
-        <select id="stats-scope" class="stats-scope" aria-label="Stats scope">
-          <option value="session">this session</option>
-          <option value="lifetime">all-time</option>
-        </select>
+    <header class="popup-head">
+      <img class="popup-logo" src="../icons/icon48.png" alt="" width="32" height="32">
+      <div class="popup-title">
+        <strong>Potato<em>fy</em></strong>
+        <span>guarding your potato</span>
       </div>
-    </div>
-    <div class="stats-grid">
-      <div class="stat-row stat-row--lead">
-        <span class="stat-label">RAM saved</span>
-        <span class="stat-value" id="stat-ram">—</span>
-      </div>
-      <div class="stat-row">
-        <span class="stat-label">Bandwidth saved</span>
-        <span class="stat-value" id="stat-bw">—</span>
-      </div>
-      <div class="stat-row">
-        <span class="stat-label">Time saved</span>
-        <span class="stat-value" id="stat-cpu">—</span>
-      </div>
-      <div class="stat-row">
-        <span class="stat-label">Requests blocked</span>
-        <span class="stat-value" id="stat-req">—</span>
-      </div>
-      <div class="stat-row">
-        <span class="stat-label">Tabs discarded</span>
-        <span class="stat-value" id="stat-tabs">—</span>
-      </div>
-    </div>
-    <button id="stats-reset" class="stats-reset" type="button">Reset</button>
-    <p class="stats-foot">Numbers are heuristic estimates based on block counts.</p>
-  </section>
+    </header>
 
-  <section class="toggles">
-    <div class="toggle-row">
-      <div class="toggle-text">
-        <label for="toggle-blocking">Block Trackers &amp; Ads</label>
-        <p>Drops analytics, ads, fonts and autoplay media at the network layer.</p>
+    <section class="popup-stats" id="stats-section">
+      <div class="popup-stats-head">
+        <span class="popup-stats-label">
+          <select id="stats-scope" class="stats-scope" aria-label="Stats scope">
+            <option value="session">this session</option>
+            <option value="lifetime">all-time</option>
+          </select>
+        </span>
+        <span class="popup-stats-chip" aria-hidden="true">live</span>
       </div>
-      <label class="switch">
-        <input type="checkbox" id="toggle-blocking">
-        <span class="slider"></span>
-      </label>
-    </div>
-
-    <div class="toggle-row toggle-row--expand">
-      <div class="toggle-text">
-        <label for="toggle-suspend">Auto-Suspend Idle Tabs</label>
-        <p>Discards tabs after the chosen idle time. Also auto-discards on low memory.</p>
+      <div class="popup-stat-row">
+        <span>RAM saved</span>
+        <span class="num accent" id="stat-ram">—</span>
       </div>
-      <label class="switch">
-        <input type="checkbox" id="toggle-suspend">
-        <span class="slider"></span>
-      </label>
-    </div>
-    <div class="suspend-controls">
-      <label class="threshold-row">
-        <span>Discard after</span>
-        <select id="idle-threshold" class="threshold-select">
-          <option value="1">1 min</option>
-          <option value="3">3 min</option>
-          <option value="5">5 min</option>
-          <option value="10">10 min</option>
-          <option value="15">15 min</option>
-          <option value="30">30 min</option>
-        </select>
-      </label>
-      <button id="discard-now-btn" class="discard-now-btn" type="button">Discard idle tabs now</button>
-    </div>
-
-    <div class="toggle-row">
-      <div class="toggle-text">
-        <label for="toggle-throttle">Throttle Background JS</label>
-        <p>Stops timers, intervals and animations on hidden tabs.</p>
+      <div class="popup-stat-row">
+        <span>Bandwidth saved</span>
+        <span class="num" id="stat-bw">—</span>
       </div>
-      <label class="switch">
-        <input type="checkbox" id="toggle-throttle">
-        <span class="slider"></span>
-      </label>
-    </div>
-
-    <div class="toggle-row">
-      <div class="toggle-text">
-        <label for="toggle-image">Image Lite Mode</label>
-        <p>Forces lazy-loading and drops <code>srcset</code> for lighter image weight.</p>
+      <div class="popup-stat-row">
+        <span>Time saved</span>
+        <span class="num" id="stat-cpu">—</span>
       </div>
-      <label class="switch">
-        <input type="checkbox" id="toggle-image">
-        <span class="slider"></span>
-      </label>
-    </div>
-
-    <div class="toggle-row">
-      <div class="toggle-text">
-        <label for="toggle-animation">Kill CSS Animations</label>
-        <p>Disables animations and transitions site-wide to ease GPU load.</p>
+      <div class="popup-stat-row">
+        <span>Requests blocked</span>
+        <span class="num" id="stat-req">—</span>
       </div>
-      <label class="switch">
-        <input type="checkbox" id="toggle-animation">
-        <span class="slider"></span>
-      </label>
-    </div>
-
-    <div class="toggle-row">
-      <div class="toggle-text">
-        <label for="toggle-autoplay">Kill Autoplay Media</label>
-        <p>Strips <code>autoplay</code> from videos and audio so they don't start on page load.</p>
+      <div class="popup-stat-row">
+        <span>3rd-party scripts</span>
+        <span class="num warn" id="stat-3p">—</span>
       </div>
-      <label class="switch">
-        <input type="checkbox" id="toggle-autoplay">
-        <span class="slider"></span>
-      </label>
-    </div>
-
-    <div class="toggle-row">
-      <div class="toggle-text">
-        <label for="toggle-prefetch">Strip Prefetch Hints</label>
-        <p>Removes <code>preload</code>, <code>prefetch</code>, <code>preconnect</code>, <code>dns-prefetch</code>.</p>
+      <div class="popup-stat-row">
+        <span>Tabs discarded</span>
+        <span class="num" id="stat-tabs">—</span>
       </div>
-      <label class="switch">
-        <input type="checkbox" id="toggle-prefetch">
-        <span class="slider"></span>
-      </label>
-    </div>
+      <button id="stats-reset" class="stats-reset" type="button">Reset</button>
+    </section>
 
-    <div class="toggle-row">
-      <div class="toggle-text">
-        <label for="toggle-video">Pause Background Videos</label>
-        <p>Pauses <code>&lt;video&gt;</code> elements on hidden tabs to free decoder memory.</p>
+    <section class="site-panel">
+      <div class="site-head">
+        <span class="eyebrow">Current site</span>
+        <span id="current-hostname" class="site-host">—</span>
       </div>
-      <label class="switch">
-        <input type="checkbox" id="toggle-video">
-        <span class="slider"></span>
-      </label>
-    </div>
-  </section>
+      <div class="site-actions">
+        <button id="whitelist-btn" class="btn-pill btn-ghost" disabled>Whitelist</button>
+        <button id="boost-tab-btn" class="btn-pill btn-primary" disabled>Boost <em>this tab</em></button>
+      </div>
+    </section>
 
-  <section class="whitelist">
-    <div class="current-site">
-      <span class="label">Current site</span>
-      <span id="current-hostname" class="hostname">—</span>
-    </div>
-    <button id="whitelist-btn" class="whitelist-btn" disabled>Whitelist This Site</button>
+    <details class="section" data-section="standard" open>
+      <summary>
+        <span class="section-name">Stand<em>ard</em></span>
+        <span class="section-meta" data-meta-for="standard"></span>
+      </summary>
+      <div class="popup-toggles">
+        <div class="popup-toggle">
+          <div class="popup-toggle-text">
+            <label for="toggle-blocking">Block trackers &amp; ads</label>
+            <p>Drops analytics, ads, fonts at the network layer.</p>
+          </div>
+          <label class="sw-wrap"><input type="checkbox" id="toggle-blocking"><span class="sw"></span></label>
+        </div>
 
-    <details class="whitelist-list-wrap">
-      <summary>Whitelisted sites (<span id="whitelist-count">0</span>)</summary>
-      <ul id="whitelist-list" class="whitelist-list"></ul>
+        <div class="popup-toggle popup-toggle--expand">
+          <div class="popup-toggle-text">
+            <label for="toggle-suspend">Suspend idle tabs</label>
+            <p>Discards tabs after the chosen idle time.</p>
+          </div>
+          <label class="sw-wrap"><input type="checkbox" id="toggle-suspend"><span class="sw"></span></label>
+        </div>
+        <div class="sub-controls">
+          <label class="inline-row">
+            <span>Discard after</span>
+            <select id="idle-threshold" class="threshold-select">
+              <option value="1">1 min</option>
+              <option value="3">3 min</option>
+              <option value="5">5 min</option>
+              <option value="10">10 min</option>
+              <option value="15">15 min</option>
+              <option value="30">30 min</option>
+            </select>
+          </label>
+          <button id="discard-now-btn" class="btn-pill btn-mini" type="button">Discard idle now</button>
+        </div>
+
+        <div class="popup-toggle">
+          <div class="popup-toggle-text">
+            <label for="toggle-throttle">Freeze background JS</label>
+            <p>Stops timers and animations on hidden tabs.</p>
+          </div>
+          <label class="sw-wrap"><input type="checkbox" id="toggle-throttle"><span class="sw"></span></label>
+        </div>
+
+        <div class="popup-toggle">
+          <div class="popup-toggle-text">
+            <label for="toggle-image-lazy">Lazy-load images</label>
+            <p>Adds <code>loading=lazy</code> and <code>fetchpriority=low</code>.</p>
+          </div>
+          <label class="sw-wrap"><input type="checkbox" id="toggle-image-lazy"><span class="sw"></span></label>
+        </div>
+
+        <div class="popup-toggle">
+          <div class="popup-toggle-text">
+            <label for="toggle-animation">Kill heavy animations</label>
+            <p>Disables CSS animations and transitions site-wide.</p>
+          </div>
+          <label class="sw-wrap"><input type="checkbox" id="toggle-animation"><span class="sw"></span></label>
+        </div>
+
+        <div class="popup-toggle">
+          <div class="popup-toggle-text">
+            <label for="toggle-autoplay">Kill autoplay media</label>
+            <p>Strips <code>autoplay</code> from videos and audio.</p>
+          </div>
+          <label class="sw-wrap"><input type="checkbox" id="toggle-autoplay"><span class="sw"></span></label>
+        </div>
+
+        <div class="popup-toggle">
+          <div class="popup-toggle-text">
+            <label for="toggle-prefetch">Strip prefetch hints</label>
+            <p>Removes <code>preload</code>, <code>prefetch</code>, <code>preconnect</code>.</p>
+          </div>
+          <label class="sw-wrap"><input type="checkbox" id="toggle-prefetch"><span class="sw"></span></label>
+        </div>
+
+        <div class="popup-toggle">
+          <div class="popup-toggle-text">
+            <label for="toggle-video">Pause background videos</label>
+            <p>Pauses <code>&lt;video&gt;</code> on hidden tabs.</p>
+          </div>
+          <label class="sw-wrap"><input type="checkbox" id="toggle-video"><span class="sw"></span></label>
+        </div>
+      </div>
     </details>
-  </section>
 
-  <section class="diagnostics">
-    <button id="run-tests-btn" class="run-tests-btn" type="button">Run Diagnostics</button>
-    <div id="test-results" class="test-results hidden"></div>
-  </section>
+    <details class="section section--max" data-section="max">
+      <summary>
+        <span class="section-name">Maximum <em>savings</em></span>
+        <span class="section-meta" data-meta-for="max"></span>
+      </summary>
+      <div class="popup-toggles">
+        <div class="popup-toggle">
+          <div class="popup-toggle-text">
+            <label for="toggle-3p-script">Block 3rd-party scripts</label>
+            <p>Drops every script not from the page's own domain. May break sites.</p>
+          </div>
+          <label class="sw-wrap"><input type="checkbox" id="toggle-3p-script"><span class="sw"></span></label>
+        </div>
+
+        <div class="popup-toggle">
+          <div class="popup-toggle-text">
+            <label for="toggle-foreground-potato">Foreground potato mode</label>
+            <p>Also blocks 3rd-party images everywhere.</p>
+          </div>
+          <label class="sw-wrap"><input type="checkbox" id="toggle-foreground-potato"><span class="sw"></span></label>
+        </div>
+
+        <div class="popup-toggle">
+          <div class="popup-toggle-text">
+            <label for="toggle-site-killers">Site-specific killers</label>
+            <p>Hides DOM bloat on YouTube, Reddit, Twitter, Facebook…</p>
+          </div>
+          <label class="sw-wrap"><input type="checkbox" id="toggle-site-killers"><span class="sw"></span></label>
+        </div>
+
+        <div class="popup-toggle">
+          <div class="popup-toggle-text">
+            <label for="toggle-video-preload">Defer video loading</label>
+            <p><code>preload=none</code> on every video; loads only on play.</p>
+          </div>
+          <label class="sw-wrap"><input type="checkbox" id="toggle-video-preload"><span class="sw"></span></label>
+        </div>
+
+        <div class="popup-toggle">
+          <div class="popup-toggle-text">
+            <label for="toggle-image-lq">Low-quality images</label>
+            <p>Strips <code>srcset</code>. Can backfire on HiDPI.</p>
+          </div>
+          <label class="sw-wrap"><input type="checkbox" id="toggle-image-lq"><span class="sw"></span></label>
+        </div>
+      </div>
+    </details>
+
+    <details class="section" data-section="memory">
+      <summary>
+        <span class="section-name">Memory <em>pressure</em></span>
+        <span class="section-meta" data-meta-for="memory"></span>
+      </summary>
+      <div class="popup-toggles">
+        <div class="popup-toggle">
+          <div class="popup-toggle-text">
+            <label for="toggle-pressure">Auto-discard on low RAM</label>
+            <p>Discards idle tabs when free memory dips.</p>
+          </div>
+          <label class="sw-wrap"><input type="checkbox" id="toggle-pressure"><span class="sw"></span></label>
+        </div>
+        <div class="sub-controls">
+          <label class="inline-row">
+            <span>Trigger below</span>
+            <select id="pressure-threshold" class="threshold-select">
+              <option value="200">200 MB free</option>
+              <option value="350">350 MB free</option>
+              <option value="500">500 MB free</option>
+              <option value="750">750 MB free</option>
+              <option value="1000">1 GB free</option>
+              <option value="1500">1.5 GB free</option>
+            </select>
+          </label>
+        </div>
+      </div>
+    </details>
+
+    <details class="section" data-section="site">
+      <summary>
+        <span class="section-name">Per-site &amp; <em>storage</em></span>
+        <span class="section-meta" data-meta-for="site"></span>
+      </summary>
+      <div class="popup-toggles">
+        <div class="site-kill-actions">
+          <button id="kill-js-btn" class="btn-pill btn-ghost" disabled>Kill JS here</button>
+          <button id="kill-img-btn" class="btn-pill btn-ghost" disabled>Kill images here</button>
+        </div>
+
+        <div class="popup-toggle">
+          <div class="popup-toggle-text">
+            <label for="toggle-cloud-sync">Sync to Google</label>
+            <p>Off keeps settings on this device only.</p>
+          </div>
+          <label class="sw-wrap"><input type="checkbox" id="toggle-cloud-sync"><span class="sw"></span></label>
+        </div>
+
+        <details class="nested-list">
+          <summary>Whitelisted sites <span id="whitelist-count" class="meta-count">0</span></summary>
+          <ul id="whitelist-list" class="host-list"></ul>
+        </details>
+
+        <details class="nested-list">
+          <summary>Potato-mode sites <span id="potato-count" class="meta-count">0</span></summary>
+          <ul id="potato-list" class="host-list"></ul>
+        </details>
+      </div>
+    </details>
+
+    <details class="section section--diag" data-section="diag">
+      <summary>
+        <span class="section-name"><em>Diagnostics</em></span>
+      </summary>
+      <div class="popup-toggles">
+        <button id="run-tests-btn" class="btn-pill btn-mini" type="button">Run diagnostics</button>
+        <div id="test-results" class="test-results hidden"></div>
+      </div>
+    </details>
+
+  </div>
 
   <script src="tests.js"></script>
-  <script src="popup.js"></script>
+  <script type="module" src="popup.js"></script>
 </body>
 </html>

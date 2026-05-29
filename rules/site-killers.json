@@ -1,0 +1,71 @@
+{
+  "youtube.com": [
+    "ytd-watch-next-secondary-results-renderer",
+    "ytd-comments#comments",
+    "ytd-merch-shelf-renderer",
+    "ytd-engagement-panel-section-list-renderer",
+    "ytd-popup-container",
+    "#chat-container",
+    "ytd-promoted-sparkles-web-renderer",
+    "ytd-display-ad-renderer",
+    "ytd-in-feed-ad-layout-renderer",
+    "ytd-ad-slot-renderer"
+  ],
+  "m.youtube.com": [
+    "ytm-watch-next-results",
+    "ytm-comments-entry-point-renderer",
+    "ytm-promoted-sparkles-web-renderer"
+  ],
+  "reddit.com": [
+    "shreddit-async-loader[bundlename='recent_pages']",
+    "shreddit-async-loader[bundlename='community_highlight_carousel']",
+    "shreddit-comments-page-ad",
+    "faceplate-tracker[source*='ad']",
+    "shreddit-sidebar-nav",
+    "div[id^='shreddit-trending-searches']"
+  ],
+  "old.reddit.com": [
+    "div.side",
+    "div.promotedlink"
+  ],
+  "twitter.com": [
+    "div[data-testid='sidebarColumn']",
+    "div[aria-label='Timeline: Trending now']",
+    "div[data-testid='placementTracking']"
+  ],
+  "x.com": [
+    "div[data-testid='sidebarColumn']",
+    "div[aria-label='Timeline: Trending now']",
+    "div[data-testid='placementTracking']"
+  ],
+  "facebook.com": [
+    "div[data-pagelet='RightRail']",
+    "div[data-pagelet*='Sponsored']",
+    "div[role='complementary']"
+  ],
+  "instagram.com": [
+    "div[role='complementary']"
+  ],
+  "linkedin.com": [
+    "aside.scaffold-layout__aside",
+    "div[data-test-id='ads']",
+    "div.ad-banner-container"
+  ],
+  "amazon.com": [
+    "div#rhf",
+    "div[cel_widget_id*='SPONSORED']",
+    "div[data-component-type='sp-sponsored-result']"
+  ],
+  "nytimes.com": [
+    "div[data-testid='inline-ad']",
+    "section.ad",
+    "aside#site-index"
+  ],
+  "cnn.com": [
+    "div.ad-slot",
+    "div[data-uri*='ads']"
+  ],
+  "github.com": [
+    "div.js-feed-item-component[data-feed-item-type='Ad']"
+  ]
+}

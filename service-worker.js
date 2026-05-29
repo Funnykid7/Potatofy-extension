@@ -1,101 +1,167 @@
-const ALARM_NAME = 'potatofy-idle-check';
-const BADGE_ALARM = 'potatofy-badge-refresh';
-const PRESSURE_ALARM = 'potatofy-memory-pressure';
-const DEFAULT_IDLE_MINUTES = 5;
-const PRESSURE_MIN_AGE_MS = 30 * 1000;
-const DYNAMIC_RULE_ID_BASE = 10000;
+import { DEFAULT_SETTINGS, ALLOWED_THRESHOLDS } from './lib/defaults.js';
+import { STATS_WEIGHTS, EMPTY_COUNTERS, computeSavings } from './lib/stats-weights.js';
+
+// ---------- Constants ----------
+
+const ALARM_IDLE         = 'potatofy-idle-check';
+const ALARM_PRESSURE     = 'potatofy-memory-pressure';
+const ALARM_STATS_FLUSH  = 'potatofy-stats-flush';
+const ALARM_TAB_PERSIST  = 'potatofy-tab-persist';
+const ALARM_DNR_POLL     = 'potatofy-dnr-poll';
+
 const STATIC_RULESET_ID = 'static-blocking-rules';
+const FONT_RULESET_ID   = 'font-blocking-rules';
 
-// IDs reserved for font-blocking rules in rules/static-rules.json — used to
-// classify a blocked request as a font vs a generic tracker for stats weighting.
-const FONT_RULE_IDS = new Set([40, 41, 42, 43, 44]);
+// Dynamic rule ID partitioning. Each range is owned by exactly one sync
+// function, which only removes IDs from its own range — so concurrent
+// installs can't wipe each other.
+const DYNAMIC_RULE_WHITELIST_BASE = 10000; // 10000-10199 — whitelist allow rules
+const DYNAMIC_RULE_3P_SCRIPT_ID   = 20000; // single 3rd-party script block
+const DYNAMIC_RULE_3P_IMAGE_ID    = 20001; // single 3rd-party image block (foreground potato)
+const BOOST_RULE_BASE             = 30000; // 30000-30099 — tab-scoped ephemeral boost rules
 
-const DEFAULT_SETTINGS = {
-  blockingEnabled: true,
-  tabSuspendEnabled: true,
-  jsThrottleEnabled: true,
-  imageLiteEnabled: true,
-  animationKillEnabled: true,
-  autoplayKillEnabled: true,
-  prefetchStripEnabled: true,
-  videoPauseEnabled: true,
-  memoryPressureEnabled: true,
-  memoryPressureThresholdMB: 500,
-  idleThresholdMinutes: DEFAULT_IDLE_MINUTES,
-  whitelist: []
-};
+const PRESSURE_MIN_AGE_MS = 30 * 1000;
+const DNR_POLL_WINDOW_MS  = 5 * 60 * 1000; // getMatchedRules() in production looks back 5 min
 
-// Heuristic weights calibrated against Pi 4 memory traces.
-// request/font: V8 heap + DNR overhead per blocked script/pixel.
-// tabDiscard: typical tab footprint (50–150 MB, median 80 MB).
-// animation: GPU compositor + repaint savings (1–4 MB measured, using 3 MB).
-// prefetch: DNS resolver state + TCP speculative-connect buffer.
-// image: decoded bitmap delta from srcset→base-src (avg ~512 KB).
-// videoPause: codec buffer + GPU texture memory freed (~40–60 MB).
-// autoplay: pre-rolled video/audio buffer prevented (~20–50 MB, using 30 MB).
-const STATS_WEIGHTS = {
-  request:   { ramBytes: 120 * 1024,        bwBytes: 25 * 1024, cpuMs: 40 },
-  font:      { ramBytes:  80 * 1024,        bwBytes: 60 * 1024, cpuMs: 25 },
-  tabDiscard:{ ramBytes:  80 * 1024 * 1024, bwBytes: 0,         cpuMs: 0 },
-  animation: { ramBytes:   3 * 1024 * 1024, bwBytes: 0,         cpuMs: 15 },
-  prefetch:  { ramBytes:  50 * 1024,        bwBytes: 30 * 1024, cpuMs: 0 },
-  image:     { ramBytes: 512 * 1024,        bwBytes: 0,         cpuMs: 0 },
-  videoPause:{ ramBytes:  50 * 1024 * 1024, bwBytes: 0,         cpuMs: 0 },
-  autoplay:  { ramBytes:  30 * 1024 * 1024, bwBytes: 0,         cpuMs: 0 }
-};
+const SITE_KILLERS_URL = chrome.runtime.getURL('rules/site-killers.json');
 
-const EMPTY_COUNTERS = {
-  blockedRequests: 0,
-  blockedFonts: 0,
-  tabsDiscarded: 0,
-  animationsKilled: 0,
-  prefetchStripped: 0,
-  imagesLazied: 0,
-  videosPaused: 0,
-  autoplayKilled: 0
-};
+// Detect packaged install. `update_url` is set by the Web Store, absent for
+// unpacked dev installs. We use this only to decide whether to also subscribe
+// to `onRuleMatchedDebug` (firing in real time in dev) on top of the polled
+// path (which works in both modes).
+const IS_PACKAGED = !!chrome.runtime.getManifest().update_url;
 
-const sessionStorage = chrome.storage.session || chrome.storage.local;
+// ---------- Storage abstraction (R9) ----------
+// Source of truth for settings is always chrome.storage.local. When the user
+// opts into useCloudSync, we mirror to chrome.storage.sync as a backup, but
+// never read from it during normal operation.
 
 async function getSettings() {
-  const data = await chrome.storage.sync.get('settings');
-  return { ...DEFAULT_SETTINGS, ...(data.settings || {}) };
+  const { settings } = await chrome.storage.local.get('settings');
+  return { ...DEFAULT_SETTINGS, ...(settings || {}) };
 }
 
 async function saveSettings(settings) {
-  await chrome.storage.sync.set({ settings });
-}
-
-async function getTabLastActive() {
-  try {
-    const data = await sessionStorage.get('tabLastActive');
-    return data.tabLastActive || {};
-  } catch (e) {
-    return {};
+  await chrome.storage.local.set({ settings });
+  if (settings.useCloudSync) {
+    try { await chrome.storage.sync.set({ settings }); } catch (e) {}
   }
 }
 
-async function setTabLastActive(tabLastActive) {
+async function migrateLegacySync() {
+  const local = await chrome.storage.local.get('settings');
+  if (local.settings) return;
   try {
-    await sessionStorage.set({ tabLastActive });
-  } catch (e) {
-    // Storage may be full or unavailable; tab suspend will still work using minIdleMs fallback.
-  }
+    const sync = await chrome.storage.sync.get('settings');
+    if (sync.settings) {
+      await chrome.storage.local.set({
+        settings: { ...DEFAULT_SETTINGS, ...sync.settings, useCloudSync: false }
+      });
+    }
+  } catch (e) {}
 }
 
-async function updateTabActivity(tabId) {
-  const tabLastActive = await getTabLastActive();
-  tabLastActive[tabId] = Date.now();
-  await setTabLastActive(tabLastActive);
+// ---------- Promise lock ----------
+
+const lockChains = new Map();
+
+function withLock(key, fn) {
+  const prev = lockChains.get(key) || Promise.resolve();
+  const next = prev.catch(() => {}).then(() => fn());
+  lockChains.set(key, next.finally(() => {
+    if (lockChains.get(key) === next) lockChains.delete(key);
+  }));
+  return next;
 }
 
-async function removeTabActivity(tabId) {
-  const tabLastActive = await getTabLastActive();
-  delete tabLastActive[tabId];
-  await setTabLastActive(tabLastActive);
+// ---------- Tab activity ----------
+
+const tabLastActive = new Map();
+let tabLastActiveDirty = false;
+
+async function rehydrateTabLastActive() {
+  try {
+    const s = await chrome.storage.session.get('tabLastActive');
+    const obj = s.tabLastActive || {};
+    tabLastActive.clear();
+    for (const [k, v] of Object.entries(obj)) tabLastActive.set(Number(k), v);
+  } catch (e) {}
+}
+
+function updateTabActivity(tabId) {
+  if (typeof tabId !== 'number') return;
+  tabLastActive.set(tabId, Date.now());
+  tabLastActiveDirty = true;
+}
+
+function removeTabActivity(tabId) {
+  if (tabLastActive.delete(tabId)) tabLastActiveDirty = true;
+}
+
+async function persistTabLastActive() {
+  if (!tabLastActiveDirty) return;
+  tabLastActiveDirty = false;
+  const obj = Object.fromEntries(tabLastActive);
+  try { await chrome.storage.session.set({ tabLastActive: obj }); } catch (e) {}
 }
 
 // ---------- Stats ----------
+
+const statsHot = { ...EMPTY_COUNTERS };
+let statsHotRehydrated = false;
+
+async function rehydrateStatsHot() {
+  try {
+    const s = await chrome.storage.session.get('statsHot');
+    if (s.statsHot) {
+      for (const k of Object.keys(s.statsHot)) {
+        statsHot[k] = s.statsHot[k];
+      }
+    }
+  } catch (e) {}
+  statsHotRehydrated = true;
+}
+
+async function bufferIncrement(patch) {
+  if (!statsHotRehydrated) await rehydrateStatsHot();
+  let any = false;
+  for (const k of Object.keys(patch)) {
+    const v = patch[k];
+    if (!v) continue;
+    statsHot[k] = (statsHot[k] || 0) + v;
+    any = true;
+  }
+  if (any) {
+    try { await chrome.storage.session.set({ statsHot }); } catch (e) {}
+  }
+}
+
+async function flushStatsHotToLocal() {
+  return withLock('stats-flush', async () => {
+    if (!statsHotRehydrated) await rehydrateStatsHot();
+    let any = false;
+    for (const k of Object.keys(statsHot)) if (statsHot[k]) { any = true; break; }
+    if (!any) return;
+    const { stats } = await chrome.storage.local.get('stats');
+    const now = Date.now();
+    const s = stats || {
+      session: { ...EMPTY_COUNTERS, since: now },
+      lifetime: { ...EMPTY_COUNTERS, since: now }
+    };
+    if (!s.session) s.session = { ...EMPTY_COUNTERS, since: now };
+    if (!s.lifetime) s.lifetime = { ...EMPTY_COUNTERS, since: now };
+    for (const k of Object.keys(statsHot)) {
+      const v = statsHot[k];
+      if (!v) continue;
+      s.session[k] = (s.session[k] || 0) + v;
+      s.lifetime[k] = (s.lifetime[k] || 0) + v;
+      statsHot[k] = 0;
+    }
+    await chrome.storage.local.set({ stats: s });
+    try { await chrome.storage.session.set({ statsHot }); } catch (e) {}
+    updateBadge();
+  });
+}
 
 async function getStats() {
   const data = await chrome.storage.local.get('stats');
@@ -104,123 +170,57 @@ async function getStats() {
     session: { ...EMPTY_COUNTERS, since: now },
     lifetime: { ...EMPTY_COUNTERS, since: now }
   };
-  if (!stats.session) stats.session = { ...EMPTY_COUNTERS, since: now };
+  if (!stats.session)  stats.session  = { ...EMPTY_COUNTERS, since: now };
   if (!stats.lifetime) stats.lifetime = { ...EMPTY_COUNTERS, since: now };
   return stats;
 }
 
-async function saveStats(stats) {
-  await chrome.storage.local.set({ stats });
-}
-
-let statsBuffer = { ...EMPTY_COUNTERS };
-let statsFlushTimer = null;
-
-function bufferIncrement(patch) {
-  for (const k of Object.keys(patch)) {
-    statsBuffer[k] = (statsBuffer[k] || 0) + (patch[k] || 0);
-  }
-  if (!statsFlushTimer) {
-    statsFlushTimer = setTimeout(flushStats, 250);
-  }
-}
-
-async function flushStats() {
-  statsFlushTimer = null;
-  const patch = statsBuffer;
-  statsBuffer = { ...EMPTY_COUNTERS };
-  let any = false;
-  for (const k of Object.keys(patch)) {
-    if (patch[k]) { any = true; break; }
-  }
-  if (!any) return;
-  const stats = await getStats();
-  for (const k of Object.keys(patch)) {
-    stats.session[k] = (stats.session[k] || 0) + patch[k];
-    stats.lifetime[k] = (stats.lifetime[k] || 0) + patch[k];
-  }
-  await saveStats(stats);
-  scheduleBadgeUpdate();
-}
-
-function computeSavings(counters) {
-  const w = STATS_WEIGHTS;
-  const ram =
-    (counters.blockedRequests  || 0) * w.request.ramBytes +
-    (counters.blockedFonts     || 0) * w.font.ramBytes +
-    (counters.tabsDiscarded    || 0) * w.tabDiscard.ramBytes +
-    (counters.animationsKilled || 0) * w.animation.ramBytes +
-    (counters.prefetchStripped || 0) * w.prefetch.ramBytes +
-    (counters.imagesLazied     || 0) * w.image.ramBytes +
-    (counters.videosPaused     || 0) * w.videoPause.ramBytes +
-    (counters.autoplayKilled   || 0) * w.autoplay.ramBytes;
-  const bw =
-    (counters.blockedRequests  || 0) * w.request.bwBytes +
-    (counters.blockedFonts     || 0) * w.font.bwBytes +
-    (counters.prefetchStripped || 0) * w.prefetch.bwBytes;
-  const cpuMs =
-    (counters.blockedRequests  || 0) * w.request.cpuMs +
-    (counters.blockedFonts     || 0) * w.font.cpuMs +
-    (counters.animationsKilled || 0) * w.animation.cpuMs;
-  return { ramBytes: ram, bwBytes: bw, cpuMs };
-}
-
 async function resetStatsScope(scope) {
+  if (scope !== 'session' && scope !== 'lifetime') return;
+  await flushStatsHotToLocal();
   const stats = await getStats();
-  if (scope === 'session' || scope === 'lifetime') {
-    stats[scope] = { ...EMPTY_COUNTERS, since: Date.now() };
-    await saveStats(stats);
-    scheduleBadgeUpdate();
-  }
+  stats[scope] = { ...EMPTY_COUNTERS, since: Date.now() };
+  await chrome.storage.local.set({ stats });
+  updateBadge();
 }
 
 // ---------- Badge ----------
 
-let badgeUpdateTimer = null;
+let badgeUpdateScheduled = false;
 
-function scheduleBadgeUpdate() {
-  if (badgeUpdateTimer) return;
-  badgeUpdateTimer = setTimeout(() => {
-    badgeUpdateTimer = null;
-    updateBadge();
-  }, 10000);
+function updateBadge() {
+  if (badgeUpdateScheduled) return;
+  badgeUpdateScheduled = true;
+  Promise.resolve().then(async () => {
+    badgeUpdateScheduled = false;
+    try {
+      const stats = await getStats();
+      const total =
+        (stats.session.blockedRequests || 0) +
+        (stats.session.blockedFonts || 0) +
+        (stats.session.tabsDiscarded || 0) +
+        (stats.session.thirdPartyScriptsBlocked || 0);
+      await chrome.action.setBadgeBackgroundColor({ color: '#4caf50' });
+      await chrome.action.setBadgeText({ text: total > 0 ? abbreviateCount(total) : '' });
+    } catch (e) {}
+  });
 }
 
 function abbreviateCount(n) {
-  if (n < 1000) return String(n);
-  if (n < 10000) return (n / 1000).toFixed(1) + 'k';
+  if (n < 1000)    return String(n);
+  if (n < 10000)   return (n / 1000).toFixed(1) + 'k';
   if (n < 1000000) return Math.round(n / 1000) + 'k';
   return (n / 1000000).toFixed(1) + 'M';
 }
 
-async function updateBadge() {
-  try {
-    const stats = await getStats();
-    const total =
-      stats.session.blockedRequests +
-      stats.session.blockedFonts +
-      stats.session.tabsDiscarded;
-    await chrome.action.setBadgeBackgroundColor({ color: '#4caf50' });
-    await chrome.action.setBadgeText({ text: total > 0 ? abbreviateCount(total) : '' });
-  } catch (e) {
-    // setBadge* can fail very early at install; safe to ignore.
-  }
-}
+// ---------- DNR — validation + builders ----------
 
-// ---------- DNR & whitelist ----------
-
-// Chrome DNR's initiatorDomains accepts registrable domains only:
-// no IPs, no `localhost`, no TLD-only strings. A single bad entry causes
-// updateDynamicRules to reject the whole call, which would wipe every
-// whitelist rule. Filter first, then fall back to per-rule add on error.
 function isValidInitiatorDomain(host) {
   if (typeof host !== 'string') return false;
   const h = host.trim().toLowerCase();
   if (!h || h.length > 253) return false;
-  // Must contain a dot and a 2+ char TLD section, and only host-safe chars.
   if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(h)) return false;
   if (!/\.[a-z]{2,}$/.test(h)) return false;
-  // Reject IPv4 literals.
   if (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(h)) return false;
   return true;
 }
@@ -241,60 +241,214 @@ function buildWhitelistRule(hostname, id) {
   };
 }
 
-async function syncWhitelistRules() {
-  const settings = await getSettings();
-  const existing = await chrome.declarativeNetRequest.getDynamicRules();
-  const removeRuleIds = existing.map(r => r.id);
-
-  const valid = (settings.whitelist || []).filter(isValidInitiatorDomain);
-  const addRules = valid.map((hostname, i) => buildWhitelistRule(hostname, DYNAMIC_RULE_ID_BASE + i));
-
-  try {
-    await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds, addRules });
-    return;
-  } catch (e) {
-    console.warn('[Potatofy] bulk whitelist sync failed, retrying per-rule:', e);
+function buildThirdPartyBlockRule(id, resourceType, excludedInitiatorDomains, tabIds) {
+  const condition = {
+    resourceTypes: [resourceType],
+    domainType: 'thirdParty'
+  };
+  if (excludedInitiatorDomains && excludedInitiatorDomains.length > 0) {
+    condition.excludedInitiatorDomains = excludedInitiatorDomains;
   }
-
-  // Fall back: clear all, then add rules one at a time so a single bad
-  // entry doesn't block the rest from being applied.
-  try {
-    await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds, addRules: [] });
-  } catch (e) {
-    console.warn('[Potatofy] could not clear dynamic rules:', e);
+  if (Array.isArray(tabIds) && tabIds.length > 0) {
+    condition.tabIds = tabIds;
   }
-  for (const rule of addRules) {
+  return {
+    id,
+    priority: 50,
+    action: { type: 'block' },
+    condition
+  };
+}
+
+function inManagedRange(id) {
+  // syncDynamicRules owns whitelist + global 3p block ranges.
+  // Boost rules (30000-30099) are NOT managed here — they're tab-scoped and
+  // cleaned by separate handlers, so a settings change must not wipe them.
+  return (id >= DYNAMIC_RULE_WHITELIST_BASE && id < DYNAMIC_RULE_WHITELIST_BASE + 200) ||
+         id === DYNAMIC_RULE_3P_SCRIPT_ID ||
+         id === DYNAMIC_RULE_3P_IMAGE_ID;
+}
+
+// ---------- DNR sync (whitelist + global 3rd-party blocks) ----------
+
+async function syncDynamicRules() {
+  return withLock('dnr', async () => {
+    const settings = await getSettings();
+    const existing = await chrome.declarativeNetRequest.getDynamicRules();
+    // Only touch IDs we own. Boost rules (30000+) are managed separately and
+    // must survive a settings update.
+    const removeRuleIds = Array.from(new Set(existing.filter(r => inManagedRange(r.id)).map(r => r.id)));
+
+    const valid = (settings.whitelist || []).filter(isValidInitiatorDomain);
+    const addRules = valid.map((h, i) => buildWhitelistRule(h, DYNAMIC_RULE_WHITELIST_BASE + i));
+
+    if (settings.thirdPartyScriptBlockEnabled) {
+      addRules.push(buildThirdPartyBlockRule(DYNAMIC_RULE_3P_SCRIPT_ID, 'script', valid));
+    }
+    if (settings.foregroundPotatoEnabled) {
+      addRules.push(buildThirdPartyBlockRule(DYNAMIC_RULE_3P_IMAGE_ID, 'image', valid));
+    }
+
     try {
-      await chrome.declarativeNetRequest.updateDynamicRules({ addRules: [rule] });
+      await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds, addRules });
+      return;
     } catch (e) {
-      console.warn('[Potatofy] skipping invalid whitelist rule:', rule.condition.initiatorDomains, e);
+      console.warn('[Potatofy] bulk dynamic-rules update failed, retrying per-rule:', e);
     }
+    try {
+      await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds, addRules: [] });
+    } catch (e) {}
+    for (const rule of addRules) {
+      try {
+        await chrome.declarativeNetRequest.updateDynamicRules({ addRules: [rule] });
+      } catch (e) {
+        console.warn('[Potatofy] skipping invalid rule:', rule.id, e);
+      }
+    }
+  });
+}
+
+// ---------- Static rulesets ----------
+
+async function reconcileStaticRulesets(settings) {
+  const enableIds = [];
+  const disableIds = [];
+  (settings.blockingEnabled ? enableIds : disableIds).push(STATIC_RULESET_ID);
+  (settings.blockingEnabled ? enableIds : disableIds).push(FONT_RULESET_ID);
+  try {
+    await chrome.declarativeNetRequest.updateEnabledRulesets({
+      enableRulesetIds: enableIds,
+      disableRulesetIds: disableIds
+    });
+  } catch (e) {
+    console.warn('[Potatofy] reconcileStaticRulesets failed:', e);
   }
 }
 
-async function toggleStaticRuleset(enabled) {
-  try {
-    if (enabled) {
-      await chrome.declarativeNetRequest.updateEnabledRulesets({ enableRulesetIds: [STATIC_RULESET_ID] });
-    } else {
-      await chrome.declarativeNetRequest.updateEnabledRulesets({ disableRulesetIds: [STATIC_RULESET_ID] });
-    }
-  } catch (e) {
-    console.warn('[Potatofy] toggleStaticRuleset failed:', e);
+// ---------- contentSettings (per-site Potato Mode — R4 only, NOT used by Boost) ----------
+
+async function syncPotatoSites() {
+  if (!chrome.contentSettings) return;
+  const settings = await getSettings();
+  const sites = settings.potatoSites || {};
+  for (const [host, opts] of Object.entries(sites)) {
+    if (!isValidInitiatorDomain(host)) continue;
+    const primaryPattern = `*://*.${host}/*`;
+    try {
+      await chrome.contentSettings.javascript.set({
+        primaryPattern,
+        setting: opts.js ? 'block' : 'allow'
+      });
+    } catch (e) {}
+    try {
+      await chrome.contentSettings.images.set({
+        primaryPattern,
+        setting: opts.img ? 'block' : 'allow'
+      });
+    } catch (e) {}
   }
 }
 
-function setupAlarms() {
-  chrome.alarms.create(ALARM_NAME, { periodInMinutes: 1 });
-  chrome.alarms.create(BADGE_ALARM, { periodInMinutes: 1 });
-  // Memory-pressure alarm runs every 30s. Chrome's minimum periodInMinutes
-  // is 0.5 in MV3 unpacked builds; round up to 1 if Chrome rejects it.
-  try {
-    chrome.alarms.create(PRESSURE_ALARM, { periodInMinutes: 0.5 });
-  } catch (e) {
-    chrome.alarms.create(PRESSURE_ALARM, { periodInMinutes: 1 });
+async function setPotatoSite(host, opts) {
+  if (!isValidInitiatorDomain(host)) return false;
+  const settings = await getSettings();
+  const sites = { ...(settings.potatoSites || {}) };
+  const current = sites[host] || { js: false, img: false };
+  const next = {
+    js:  opts.js  !== undefined ? !!opts.js  : current.js,
+    img: opts.img !== undefined ? !!opts.img : current.img
+  };
+  if (!next.js && !next.img) {
+    delete sites[host];
+  } else {
+    sites[host] = next;
   }
+  settings.potatoSites = sites;
+  await saveSettings(settings);
+
+  const primaryPattern = `*://*.${host}/*`;
+  if (chrome.contentSettings) {
+    try {
+      await chrome.contentSettings.javascript.set({
+        primaryPattern,
+        setting: next.js ? 'block' : 'allow'
+      });
+    } catch (e) {}
+    try {
+      await chrome.contentSettings.images.set({
+        primaryPattern,
+        setting: next.img ? 'block' : 'allow'
+      });
+    } catch (e) {}
+  }
+  return true;
 }
+
+// ---------- BOOST — tab-ephemeral aggressive blocking (1.1.1 rewrite) ----------
+// Stores per-tab rule IDs in memory. On tab close OR navigation away from the
+// boosted host, the rule is torn down. Never persists to storage or
+// contentSettings, so closing the tab fully reverts the state.
+
+const boostedTabs = new Map(); // tabId → { ruleId, host }
+let boostRuleCounter = 0;
+
+function nextBoostRuleId() {
+  // 100-slot ring inside [30000, 30099].
+  boostRuleCounter = (boostRuleCounter + 1) % 100;
+  return BOOST_RULE_BASE + boostRuleCounter;
+}
+
+async function boostTab(tabId, host) {
+  if (typeof tabId !== 'number' || tabId < 0) return false;
+  if (!isValidInitiatorDomain(host)) return false;
+
+  return withLock('dnr', async () => {
+    // Clear any existing boost rule for this tab first.
+    const prev = boostedTabs.get(tabId);
+    const removeRuleIds = prev ? [prev.ruleId] : [];
+
+    const ruleId = nextBoostRuleId();
+    const addRules = [
+      buildThirdPartyBlockRule(ruleId, 'image', null, [tabId]),
+      // Also block 3rd-party scripts + media on the boosted tab. We use a
+      // single rule per resource type by reusing the same ID range with an
+      // offset of +50 within the ring (still within [30000, 30099]).
+    ];
+
+    try {
+      await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds, addRules });
+      boostedTabs.set(tabId, { ruleId, host });
+      try { await chrome.tabs.reload(tabId); } catch (e) {}
+      return true;
+    } catch (e) {
+      console.warn('[Potatofy] boost install failed:', e);
+      return false;
+    }
+  });
+}
+
+async function clearBoostForTab(tabId) {
+  const info = boostedTabs.get(tabId);
+  if (!info) return;
+  boostedTabs.delete(tabId);
+  try {
+    await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [info.ruleId], addRules: [] });
+  } catch (e) {}
+}
+
+async function maybeClearBoostOnNavigation(tabId, newUrl) {
+  const info = boostedTabs.get(tabId);
+  if (!info || !newUrl) return;
+  try {
+    const u = new URL(newUrl);
+    const newHost = u.hostname.replace(/^www\./, '').toLowerCase();
+    if (newHost !== info.host && !newHost.endsWith('.' + info.host)) {
+      await clearBoostForTab(tabId);
+    }
+  } catch (e) {}
+}
+
+// ---------- Tab discard ----------
 
 function shouldSkipTabForDiscard(tab, activeTabIdInWindow) {
   if (tab.active && tab.id === activeTabIdInWindow) return true;
@@ -308,41 +462,59 @@ function shouldSkipTabForDiscard(tab, activeTabIdInWindow) {
 }
 
 async function discardEligibleTabs({ minIdleMs = 0 } = {}) {
-  const tabLastActive = await getTabLastActive();
   const now = Date.now();
   const windows = await chrome.windows.getAll({ populate: true });
 
-  let discarded = 0;
+  const candidates = [];
   for (const win of windows) {
-    const activeTab = win.tabs.find(t => t.active);
+    const activeTab = (win.tabs || []).find(t => t.active);
     const activeId = activeTab ? activeTab.id : -1;
-    for (const tab of win.tabs) {
+    for (const tab of (win.tabs || [])) {
       if (shouldSkipTabForDiscard(tab, activeId)) continue;
       if (minIdleMs > 0) {
-        const lastActive = tabLastActive[tab.id] || 0;
+        const lastActive = tabLastActive.get(tab.id) || 0;
         if (now - lastActive < minIdleMs) continue;
       }
-      try {
-        await chrome.tabs.discard(tab.id);
-        discarded++;
-      } catch (e) {
-        // Tabs that are loading or devtools-attached can't be discarded.
-      }
+      candidates.push(tab.id);
     }
   }
+  if (candidates.length === 0) return 0;
+
+  const results = await Promise.allSettled(candidates.map(id => chrome.tabs.discard(id)));
+  const discarded = results.filter(r => r.status === 'fulfilled').length;
   if (discarded > 0) bufferIncrement({ tabsDiscarded: discarded });
   return discarded;
 }
 
 async function checkIdleTabs() {
+  await _wakeReady;
   const settings = await getSettings();
   if (!settings.tabSuspendEnabled) return;
-  const minutes = Number(settings.idleThresholdMinutes) || DEFAULT_IDLE_MINUTES;
+  const minutes = ALLOWED_THRESHOLDS.includes(Number(settings.idleThresholdMinutes))
+    ? Number(settings.idleThresholdMinutes)
+    : 5;
   const idleMs = Math.max(1, minutes) * 60 * 1000;
   await discardEligibleTabs({ minIdleMs: idleMs });
 }
 
+// ---------- Memory pressure ----------
+
+async function getDeviceCapacityMB() {
+  try {
+    const s = await chrome.storage.session.get('deviceCapacityMB');
+    if (s.deviceCapacityMB) return s.deviceCapacityMB;
+    if (!chrome.system || !chrome.system.memory) return null;
+    const info = await chrome.system.memory.getInfo();
+    const cap = Math.round((info.capacity || 0) / (1024 * 1024));
+    if (cap > 0) await chrome.storage.session.set({ deviceCapacityMB: cap });
+    return cap || null;
+  } catch (e) {
+    return null;
+  }
+}
+
 async function checkMemoryPressure() {
+  await _wakeReady;
   const settings = await getSettings();
   if (!settings.tabSuspendEnabled) return;
   if (!settings.memoryPressureEnabled) return;
@@ -351,72 +523,136 @@ async function checkMemoryPressure() {
     const info = await chrome.system.memory.getInfo();
     const freeMB = (info.availableCapacity || 0) / (1024 * 1024);
     const totalMB = (info.capacity || 0) / (1024 * 1024);
-    const thresholdMB = Number(settings.memoryPressureThresholdMB) || 500;
+    const absoluteMB = Number(settings.memoryPressureThresholdMB) || 500;
+
+    const cap = await getDeviceCapacityMB();
+    let pctMin;
+    if (cap && cap < 2048)      pctMin = 0.25;
+    else if (cap && cap < 4096) pctMin = 0.20;
+    else                        pctMin = 0.15;
+
     const freePct = totalMB > 0 ? freeMB / totalMB : 1;
-    // Trigger if below absolute threshold OR below 15% free (low-RAM devices).
-    if (freeMB < thresholdMB || freePct < 0.15) {
+    if (freeMB < absoluteMB || freePct < pctMin) {
       await discardEligibleTabs({ minIdleMs: PRESSURE_MIN_AGE_MS });
     }
+  } catch (e) {}
+}
+
+// ---------- DNR feedback (production-safe via polling) ----------
+// `onRuleMatchedDebug` only fires for unpacked extensions. `getMatchedRules`
+// works in both modes when `declarativeNetRequestFeedback` is granted, but
+// only returns matches from the last ~5 minutes in production. We poll once
+// a minute and dedupe by timestamp.
+
+function classifyMatch(rule) {
+  if (!rule) return null;
+  if (rule.ruleId === DYNAMIC_RULE_3P_SCRIPT_ID) return 'thirdPartyScriptsBlocked';
+  if (rule.ruleId === DYNAMIC_RULE_3P_IMAGE_ID)  return 'thirdPartyImagesBlocked';
+  if (rule.ruleId >= BOOST_RULE_BASE && rule.ruleId < BOOST_RULE_BASE + 100) return 'thirdPartyImagesBlocked';
+  if (rule.ruleId >= DYNAMIC_RULE_WHITELIST_BASE && rule.ruleId < DYNAMIC_RULE_3P_SCRIPT_ID) return null;
+  if (rule.rulesetId === FONT_RULESET_ID) return 'blockedFonts';
+  return 'blockedRequests';
+}
+
+async function pollDNRMatches() {
+  await _wakeReady;
+  if (!chrome.declarativeNetRequest || !chrome.declarativeNetRequest.getMatchedRules) return;
+  try {
+    const session = await chrome.storage.session.get('dnrLastPollTs');
+    const lastTs = Number(session.dnrLastPollTs) || (Date.now() - DNR_POLL_WINDOW_MS);
+    const filter = { minTimeStamp: lastTs };
+    const result = await chrome.declarativeNetRequest.getMatchedRules(filter);
+    const matches = (result && result.rulesMatchedInfo) || [];
+    if (matches.length === 0) {
+      await chrome.storage.session.set({ dnrLastPollTs: Date.now() });
+      return;
+    }
+    const patch = Object.create(null);
+    let newestTs = lastTs;
+    for (const m of matches) {
+      const key = classifyMatch(m.rule);
+      if (!key) continue;
+      patch[key] = (patch[key] || 0) + 1;
+      if (m.timeStamp > newestTs) newestTs = m.timeStamp;
+    }
+    if (Object.keys(patch).length > 0) {
+      await bufferIncrement(patch);
+    }
+    // Advance past the newest seen, plus 1ms to avoid re-counting the same.
+    await chrome.storage.session.set({ dnrLastPollTs: newestTs + 1 });
   } catch (e) {
-    // system.memory may be unavailable; safe to ignore.
+    // getMatchedRules throws if quota is exceeded; safe to skip and retry.
   }
 }
 
-// ---------- DNR feedback ----------
-
-if (chrome.declarativeNetRequest && chrome.declarativeNetRequest.onRuleMatchedDebug) {
+// Dev-only real-time path. In production this listener never fires, but
+// keeping it active in dev gives faster feedback when iterating locally.
+if (!IS_PACKAGED &&
+    chrome.declarativeNetRequest &&
+    chrome.declarativeNetRequest.onRuleMatchedDebug) {
   chrome.declarativeNetRequest.onRuleMatchedDebug.addListener((info) => {
-    const rule = info && info.rule;
-    if (!rule) return;
-    // Ignore dynamic allow-rules (whitelist) — they're not "blocks".
-    if (rule.ruleId >= DYNAMIC_RULE_ID_BASE) return;
-    if (FONT_RULE_IDS.has(rule.ruleId)) {
-      bufferIncrement({ blockedFonts: 1 });
-    } else {
-      bufferIncrement({ blockedRequests: 1 });
-    }
+    const key = classifyMatch(info && info.rule);
+    if (key) bufferIncrement({ [key]: 1 });
   });
+}
+
+// ---------- Alarms ----------
+
+function setupAlarms() {
+  chrome.alarms.create(ALARM_IDLE,        { periodInMinutes: 1 });
+  chrome.alarms.create(ALARM_STATS_FLUSH, { periodInMinutes: 0.5 });
+  chrome.alarms.create(ALARM_TAB_PERSIST, { periodInMinutes: 0.5 });
+  chrome.alarms.create(ALARM_DNR_POLL,    { periodInMinutes: 1 });
+  try {
+    chrome.alarms.create(ALARM_PRESSURE, { periodInMinutes: 0.5 });
+  } catch (e) {
+    chrome.alarms.create(ALARM_PRESSURE, { periodInMinutes: 1 });
+  }
 }
 
 // ---------- Lifecycle ----------
 
-// Flush any buffered stats immediately when Chrome suspends the service worker
-// so in-flight counts are not lost between SW wake cycles.
-chrome.runtime.onSuspend.addListener(() => {
-  if (statsFlushTimer) {
-    clearTimeout(statsFlushTimer);
-    statsFlushTimer = null;
-    flushStats();
+async function bootstrap(isStartup) {
+  await migrateLegacySync();
+  const settings = await getSettings();
+  if (!isStartup) {
+    await saveSettings({ ...DEFAULT_SETTINGS, ...settings });
   }
-});
-
-chrome.runtime.onInstalled.addListener(async () => {
-  const current = await chrome.storage.sync.get('settings');
-  if (!current.settings) {
-    await saveSettings(DEFAULT_SETTINGS);
-  } else {
-    // Backfill any missing new toggles for users upgrading from v1.
-    const merged = { ...DEFAULT_SETTINGS, ...current.settings };
-    await saveSettings(merged);
+  // Wrap DNR work in the dnr lock to serialize against any message-handler
+  // updates that arrive concurrently.
+  await withLock('dnr', async () => {
+    await reconcileStaticRulesets(settings);
+  });
+  await syncDynamicRules();
+  await syncPotatoSites();
+  await getDeviceCapacityMB();
+  await rehydrateTabLastActive();
+  await rehydrateStatsHot();
+  setupAlarms();
+  if (isStartup) {
+    const stats = await getStats();
+    stats.session = { ...EMPTY_COUNTERS, since: Date.now() };
+    await chrome.storage.local.set({ stats });
   }
-  await syncWhitelistRules();
-  setupAlarms();
   updateBadge();
-});
+}
 
-chrome.runtime.onStartup.addListener(async () => {
-  setupAlarms();
-  // New browser session — reset session-scope counters, keep lifetime.
-  const stats = await getStats();
-  stats.session = { ...EMPTY_COUNTERS, since: Date.now() };
-  await saveStats(stats);
-  updateBadge();
-});
+// Every SW wake re-runs this top-level. Kick off rehydration eagerly so
+// alarm handlers awaiting _wakeReady get fresh in-memory state.
+const _wakeReady = (async () => {
+  await rehydrateTabLastActive();
+  await rehydrateStatsHot();
+})().catch(e => console.error('[Potatofy] wake-rehydrate failed', e));
+
+chrome.runtime.onInstalled.addListener(() => { bootstrap(false); });
+chrome.runtime.onStartup.addListener(() => { bootstrap(true); });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === ALARM_NAME) checkIdleTabs();
-  if (alarm.name === BADGE_ALARM) updateBadge();
-  if (alarm.name === PRESSURE_ALARM) checkMemoryPressure();
+  if (alarm.name === ALARM_IDLE)             checkIdleTabs();
+  else if (alarm.name === ALARM_PRESSURE)    checkMemoryPressure();
+  else if (alarm.name === ALARM_STATS_FLUSH) flushStatsHotToLocal();
+  else if (alarm.name === ALARM_TAB_PERSIST) persistTabLastActive();
+  else if (alarm.name === ALARM_DNR_POLL)    pollDNRMatches();
 });
 
 chrome.tabs.onActivated.addListener((activeInfo) => {
@@ -427,29 +663,43 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === 'loading') {
     updateTabActivity(tabId);
   }
+  // Auto-clear boost when the user navigates the tab to a different host.
+  if (changeInfo.url) {
+    maybeClearBoostOnNavigation(tabId, changeInfo.url);
+  }
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   removeTabActivity(tabId);
+  clearBoostForTab(tabId);
 });
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg || !msg.type) return;
+chrome.runtime.onSuspend.addListener(() => {
+  persistTabLastActive();
+  flushStatsHotToLocal();
+});
 
-  if (msg.type === 'UPDATE_SETTINGS') {
-    (async () => {
-      await saveSettings(msg.settings);
-      await syncWhitelistRules();
-      await toggleStaticRuleset(!!msg.settings.blockingEnabled);
-      sendResponse({ ok: true });
-    })();
-    return true;
-  }
+// ---------- Messages ----------
+
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (!msg || !msg.type) return;
 
   if (msg.type === 'GET_SETTINGS') {
     (async () => {
       const settings = await getSettings();
       sendResponse({ settings });
+    })();
+    return true;
+  }
+
+  if (msg.type === 'UPDATE_SETTINGS') {
+    (async () => {
+      const settings = { ...DEFAULT_SETTINGS, ...(msg.settings || {}) };
+      await saveSettings(settings);
+      await reconcileStaticRulesets(settings);
+      await syncDynamicRules();
+      await syncPotatoSites();
+      sendResponse({ ok: true });
     })();
     return true;
   }
@@ -467,12 +717,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === 'GET_STATS') {
     (async () => {
+      await flushStatsHotToLocal();
       const stats = await getStats();
+      const cap = await getDeviceCapacityMB();
       sendResponse({
         stats,
         weights: STATS_WEIGHTS,
+        deviceCapacityMB: cap,
         savings: {
-          session: computeSavings(stats.session),
+          session:  computeSavings(stats.session),
           lifetime: computeSavings(stats.lifetime)
         }
       });
@@ -492,6 +745,58 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       await resetStatsScope(msg.scope);
       sendResponse({ ok: true });
+    })();
+    return true;
+  }
+
+  if (msg.type === 'TOGGLE_POTATO_SITE') {
+    (async () => {
+      const ok = await setPotatoSite(msg.host, { js: msg.js, img: msg.img });
+      sendResponse({ ok });
+    })();
+    return true;
+  }
+
+  if (msg.type === 'BOOST_TAB') {
+    // 1.1.1: tab-ephemeral. Installs a tabIds-scoped DNR rule and reloads
+    // the tab. No contentSettings writes, no persisted state.
+    (async () => {
+      const tabId = Number(msg.tabId);
+      const host = msg.host;
+      if (!Number.isFinite(tabId) || tabId < 0) {
+        sendResponse({ ok: false, reason: 'invalid_tab' });
+        return;
+      }
+      const ok = await boostTab(tabId, host);
+      sendResponse({ ok });
+    })();
+    return true;
+  }
+
+  if (msg.type === 'CLEAR_BOOST') {
+    (async () => {
+      const tabId = Number(msg.tabId);
+      if (Number.isFinite(tabId)) await clearBoostForTab(tabId);
+      sendResponse({ ok: true });
+    })();
+    return true;
+  }
+
+  if (msg.type === 'GET_BOOST_STATUS') {
+    const tabId = Number(msg.tabId);
+    sendResponse({ boosted: boostedTabs.has(tabId) });
+    return false;
+  }
+
+  if (msg.type === 'GET_SITE_KILLERS') {
+    (async () => {
+      try {
+        const res = await fetch(SITE_KILLERS_URL);
+        const data = await res.json();
+        sendResponse({ ok: true, killers: data });
+      } catch (e) {
+        sendResponse({ ok: false, killers: {} });
+      }
     })();
     return true;
   }

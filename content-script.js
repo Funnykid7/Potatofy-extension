@@ -1,18 +1,29 @@
 (function () {
+  // Default shape mirrors the relevant subset of lib/defaults.js. Content
+  // scripts can't import modules, so this snapshot is intentional. If a key
+  // is added here, also add it to lib/defaults.js and resolveDetail below.
   const DEFAULTS = {
     blockingEnabled: true,
     tabSuspendEnabled: true,
     jsThrottleEnabled: true,
-    imageLiteEnabled: true,
+    imageLazyEnabled: true,
+    imageLowQualityEnabled: false,
     animationKillEnabled: true,
     autoplayKillEnabled: true,
     prefetchStripEnabled: true,
     videoPauseEnabled: true,
-    whitelist: []
+    videoPreloadNoneEnabled: true,
+    siteKillersEnabled: true,
+    whitelist: [],
+    potatoSites: {}
   };
 
-  // Stats message types accepted from the MAIN-world page bridge.
-  const STAT_KEYS = new Set(['animationsKilled', 'prefetchStripped', 'imagesLazied', 'videosPaused', 'autoplayKilled']);
+  const STAT_KEYS = new Set([
+    'animationsKilled', 'prefetchStripped', 'imagesLazied',
+    'videosPaused', 'autoplayKilled', 'siteKillerHits'
+  ]);
+
+  let siteKillerCache = null;
 
   function normalizeHost(h) {
     return (h || '').replace(/^www\./, '').toLowerCase();
@@ -20,44 +31,78 @@
 
   function isHostWhitelisted(hostname, whitelist) {
     const host = normalizeHost(hostname);
-    return whitelist.some(d => {
+    return (whitelist || []).some(d => {
       const dn = normalizeHost(d);
       return host === dn || host.endsWith('.' + dn);
     });
   }
 
-  function buildDetail(settings) {
+  function killersForHost(hostname, killerMap) {
+    if (!killerMap) return [];
+    const host = normalizeHost(hostname);
+    const out = [];
+    for (const [pattern, selectors] of Object.entries(killerMap)) {
+      const p = normalizeHost(pattern);
+      if (host === p || host.endsWith('.' + p)) {
+        if (Array.isArray(selectors)) out.push(...selectors);
+      }
+    }
+    return out;
+  }
+
+  async function loadSiteKillers() {
+    if (siteKillerCache !== null) return siteKillerCache;
+    try {
+      const reply = await chrome.runtime.sendMessage({ type: 'GET_SITE_KILLERS' });
+      siteKillerCache = (reply && reply.killers) || {};
+    } catch (e) {
+      siteKillerCache = {};
+    }
+    return siteKillerCache;
+  }
+
+  function buildDetail(settings, killerMap) {
     const merged = { ...DEFAULTS, ...(settings || {}) };
     const whitelisted = isHostWhitelisted(location.hostname, merged.whitelist);
+    const siteKillers = (merged.siteKillersEnabled && !whitelisted)
+      ? killersForHost(location.hostname, killerMap)
+      : [];
     return {
-      jsThrottleEnabled:     merged.jsThrottleEnabled    && !whitelisted,
-      imageLiteEnabled:      merged.imageLiteEnabled     && !whitelisted,
-      animationKillEnabled:  merged.animationKillEnabled && !whitelisted,
-      autoplayKillEnabled:   merged.autoplayKillEnabled  && !whitelisted,
-      prefetchStripEnabled:  merged.prefetchStripEnabled && !whitelisted,
-      videoPauseEnabled:     merged.videoPauseEnabled    && !whitelisted
+      jsThrottleEnabled:       merged.jsThrottleEnabled       && !whitelisted,
+      imageLazyEnabled:        merged.imageLazyEnabled        && !whitelisted,
+      imageLowQualityEnabled:  merged.imageLowQualityEnabled  && !whitelisted,
+      animationKillEnabled:    merged.animationKillEnabled    && !whitelisted,
+      autoplayKillEnabled:     merged.autoplayKillEnabled     && !whitelisted,
+      prefetchStripEnabled:    merged.prefetchStripEnabled    && !whitelisted,
+      videoPauseEnabled:       merged.videoPauseEnabled       && !whitelisted,
+      videoPreloadNoneEnabled: merged.videoPreloadNoneEnabled && !whitelisted,
+      siteKillersEnabled:      merged.siteKillersEnabled      && !whitelisted,
+      siteKillers
     };
   }
 
   function dispatch(name, detail) {
-    try {
-      window.dispatchEvent(new CustomEvent(name, { detail }));
-    } catch (e) {
-      // CustomEvent dispatch can fail in unusual frame contexts; ignore.
-    }
+    try { window.dispatchEvent(new CustomEvent(name, { detail })); } catch (e) {}
   }
 
-  chrome.storage.sync.get('settings', (data) => {
-    dispatch('__potatofy_init', buildDetail(data.settings));
-  });
+  async function init() {
+    const [data, killerMap] = await Promise.all([
+      chrome.storage.local.get('settings'),
+      loadSiteKillers()
+    ]);
+    dispatch('__potatofy_init', buildDetail(data.settings, killerMap));
+  }
+
+  init();
 
   chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName !== 'sync' || !changes.settings) return;
-    dispatch('__potatofy_settings_update', buildDetail(changes.settings.newValue));
+    if (areaName !== 'local' || !changes.settings) return;
+    loadSiteKillers().then((killerMap) => {
+      dispatch('__potatofy_settings_update', buildDetail(changes.settings.newValue, killerMap));
+    });
   });
 
-  // Bridge stat counters from the MAIN-world content script back to the
-  // service worker. Debounced on the MAIN-world side; we just forward.
+  // Stats bridge — MAIN-world → service worker.
   window.addEventListener('__potatofy_stat', (e) => {
     const patch = e && e.detail;
     if (!patch || typeof patch !== 'object') return;
@@ -70,8 +115,6 @@
     if (Object.keys(safe).length === 0) return;
     try {
       chrome.runtime.sendMessage({ type: 'STATS_INCREMENT', patch: safe });
-    } catch (e) {
-      // Extension context may be invalidated during reloads; safe to ignore.
-    }
+    } catch (e) {}
   });
 })();
