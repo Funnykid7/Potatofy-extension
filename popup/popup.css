@@ -666,6 +666,51 @@ code {
   .popup-stats-chip::before { animation: none; opacity: 1; }
 }
 
+/* ============================================================
+   Toast (1.1.2 — whitelist cap, etc.)
+   ============================================================ */
+
+.toast {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  background: var(--surface-3);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.4;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  z-index: 999;
+  animation: toast-in 0.18s ease-out;
+}
+.toast.fade-out { animation: toast-out 0.18s ease-in forwards; }
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes toast-out {
+  from { opacity: 1; transform: translateY(0); }
+  to   { opacity: 0; transform: translateY(8px); }
+}
+
+/* ============================================================
+   Boost active state (1.1.2 — D from plan)
+   ============================================================ */
+
+.btn-pill.active {
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  color: var(--accent);
+}
+.btn-pill.active:not(:disabled):hover {
+  background: var(--accent-border);
+  color: var(--text);
+}
+
 /* Scrollbar inside the popup */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
