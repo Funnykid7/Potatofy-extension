@@ -596,7 +596,61 @@ function bindDiagnosticsBtn() {
   });
 }
 
+// Privacy Policy Modal
+const privacyModal = document.getElementById('privacy-modal');
+const privacyCheckbox = document.getElementById('privacy-accept-check');
+const privacyAcceptBtn = document.getElementById('privacy-accept-btn');
+
+async function checkPrivacyAcceptance() {
+  try {
+    const data = await chrome.storage.local.get('privacyAccepted');
+    return data.privacyAccepted === true;
+  } catch (e) {
+    console.warn('[Potatofy] Could not check privacy status:', e);
+    return false;
+  }
+}
+
+function showPrivacyModal() {
+  privacyModal.style.display = 'flex';
+  document.querySelector('.popup').style.pointerEvents = 'none';
+  document.querySelector('.popup').style.opacity = '0.4';
+  privacyCheckbox.focus();
+}
+
+function hidePrivacyModal() {
+  privacyModal.style.display = 'none';
+  document.querySelector('.popup').style.pointerEvents = 'auto';
+  document.querySelector('.popup').style.opacity = '1';
+}
+
+privacyCheckbox.addEventListener('change', () => {
+  privacyAcceptBtn.disabled = !privacyCheckbox.checked;
+});
+
+privacyAcceptBtn.addEventListener('click', async () => {
+  try {
+    await chrome.storage.local.set({ privacyAccepted: true });
+    hidePrivacyModal();
+  } catch (e) {
+    console.error('[Potatofy] Could not save privacy acceptance:', e);
+  }
+});
+
+privacyModal.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    e.preventDefault();
+  }
+});
+
 document.addEventListener('DOMContentLoaded', async () => {
+  // Check privacy policy acceptance first
+  const accepted = await checkPrivacyAcceptance();
+  if (!accepted) {
+    showPrivacyModal();
+    return;
+  }
+
   currentHostname = await getActiveHostname();
   els.hostname.textContent = currentHostname || 'unavailable';
   await loadSettings();

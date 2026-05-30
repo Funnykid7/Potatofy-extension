@@ -278,6 +278,33 @@
 
   </div>
 
+  <!-- Privacy Policy Accept Modal (shown on first-run) -->
+  <div id="privacy-modal" class="modal" style="display: none;">
+    <div class="modal-backdrop"></div>
+    <div class="modal-box">
+      <div class="modal-content">
+        <h2>Privacy Policy</h2>
+        <p>Potatofy respects your privacy. Before you start, please review our privacy policy:</p>
+        <ul class="privacy-highlights">
+          <li>✓ No analytics, telemetry, or tracking</li>
+          <li>✓ Settings stored locally on your device</li>
+          <li>✓ Optional cloud sync (off by default)</li>
+          <li>✓ Open source — audit the code on GitHub</li>
+        </ul>
+        <a href="https://funnykid7.github.io/Potatofy-extension/privacy" target="_blank" rel="noopener" class="btn btn-primary btn-full">
+          Read Full Privacy Policy
+        </a>
+      </div>
+      <div class="modal-footer">
+        <label class="consent-checkbox">
+          <input type="checkbox" id="privacy-accept-check" />
+          <span>I've read and accept the privacy policy</span>
+        </label>
+        <button id="privacy-accept-btn" class="btn btn-primary" disabled>Accept & Continue</button>
+      </div>
+    </div>
+  </div>
+
   <script src="../lib/formatters.js"></script>
   <script src="tests.js"></script>
   <script type="module" src="popup.js"></script>

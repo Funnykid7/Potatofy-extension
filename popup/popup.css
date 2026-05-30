@@ -719,3 +719,122 @@ code {
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+
+/* Privacy Policy Modal */
+.modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.modal-backdrop {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(1px);
+}
+
+.modal-box {
+  position: relative;
+  z-index: 10000;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.4), 0 10px 10px -5px rgba(0, 0, 0, 0.2);
+  animation: slideUp 0.3s ease-out;
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.modal-content h2 {
+  margin: 0 0 12px;
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.modal-content p {
+  margin: 0 0 16px;
+  color: var(--text-mute);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.privacy-highlights {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 16px;
+}
+
+.privacy-highlights li {
+  padding: 6px 0;
+  color: var(--text-mute);
+  font-size: 0.875rem;
+  line-height: 1.4;
+}
+
+.btn-full {
+  width: 100%;
+  display: block;
+  text-align: center;
+}
+
+.modal-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.consent-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  color: var(--text-mute);
+  line-height: 1.4;
+}
+
+.consent-checkbox input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  cursor: pointer;
+  margin-top: 2px;
+}
+
+#privacy-accept-btn {
+  width: 100%;
+}
+
+#privacy-accept-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
