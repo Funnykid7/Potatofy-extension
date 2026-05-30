@@ -333,7 +333,11 @@ async function refreshStats() {
     const ramDisplayed = Math.min(savings.ramBytes, capBytes);
     const isCapped = ramDisplayed < savings.ramBytes;
 
-    els.statRam.textContent  = (isCapped ? '≥' : '~') + formatBytes(ramDisplayed);
+    // Check if we have a real RAM measurement (from actual tab discard)
+    const hasRealMeasurement = (counters.realRamFreed || 0) > 0;
+    const ramPrefix = hasRealMeasurement ? '' : (isCapped ? '≥' : '~');
+
+    els.statRam.textContent  = ramPrefix + formatBytes(ramDisplayed);
     els.statBw.textContent   = '~' + formatBytes(savings.bwBytes);
     els.statCpu.textContent  = '~' + formatMs(savings.cpuMs);
     els.statReq.textContent  = ((counters.blockedRequests || 0) + (counters.blockedFonts || 0)).toLocaleString();

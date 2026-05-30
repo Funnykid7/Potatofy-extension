@@ -902,13 +902,46 @@ async function discardEligibleTabs({ minIdleMs = 0 } = {}) {
   }
   if (candidates.length === 0) return 0;
 
+  // Measure free memory BEFORE discard
+  let memBefore = null;
+  try {
+    if (chrome.system && chrome.system.memory) {
+      const info = await chrome.system.memory.getInfo();
+      memBefore = info.availableCapacity || 0;
+    }
+  } catch (e) {
+    console.warn('[Potatofy] Failed to measure memory before discard:', e);
+  }
+
+  // Discard tabs
   const results = await Promise.allSettled(candidates.map(id => chrome.tabs.discard(id)));
   // L-2 — count only tabs Chrome actually discarded. chrome.tabs.discard
   // fulfills with the updated Tab (discarded:true) on success, but can also
   // fulfill with undefined when Chrome declines to discard — those must not
   // inflate the tabsDiscarded stat.
   const discarded = results.filter(r => r.status === 'fulfilled' && r.value && r.value.discarded).length;
-  if (discarded > 0) bufferIncrement({ tabsDiscarded: discarded });
+
+  // Measure free memory AFTER discard and calculate real freed RAM
+  if (discarded > 0) {
+    let realFreedBytes = 0;
+    try {
+      if (chrome.system && chrome.system.memory && memBefore !== null) {
+        const info = await chrome.system.memory.getInfo();
+        const memAfter = info.availableCapacity || 0;
+        // availableCapacity increases when memory is freed, so: freed = after - before
+        realFreedBytes = Math.max(0, memAfter - memBefore);
+      }
+    } catch (e) {
+      console.warn('[Potatofy] Failed to measure memory after discard:', e);
+    }
+
+    // Buffer both the discard count and real freed memory
+    const increment = { tabsDiscarded: discarded };
+    if (realFreedBytes > 0) {
+      increment.realRamFreed = realFreedBytes;
+    }
+    bufferIncrement(increment);
+  }
   return discarded;
 }
 
