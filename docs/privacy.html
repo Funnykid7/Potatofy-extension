@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>Privacy Policy — Potatofy</title>
+  <meta name="description" content="Potatofy privacy policy. No analytics, no telemetry, no data collection by default." />
+  <link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
+  <link rel="alternate icon" href="assets/icon48.png" />
+  <link rel="stylesheet" href="styles.css" />
+  <style>
+    .prose {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: clamp(48px, 7vw, 96px) clamp(20px, 4vw, 48px);
+    }
+    .prose h1 {
+      font-size: clamp(2rem, 4vw, 3rem);
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      line-height: 1.08;
+      margin: 0 0 8px;
+    }
+    .prose .updated {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      color: var(--text-dim);
+      margin: 0 0 var(--space-5);
+    }
+    .prose h2 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      letter-spacing: -0.015em;
+      margin: var(--space-5) 0 12px;
+      color: var(--text);
+    }
+    .prose p, .prose li {
+      font-size: 1rem;
+      color: var(--text-mute);
+      line-height: 1.65;
+      margin: 0 0 14px;
+    }
+    .prose ul {
+      padding-left: 22px;
+      margin: 0 0 14px;
+    }
+    .prose li { margin: 0 0 6px; }
+    .prose code {
+      font-family: var(--font-mono);
+      font-size: 0.88em;
+      background: var(--surface-3);
+      border: 1px solid var(--border-strong);
+      padding: 1px 5px;
+      border-radius: 4px;
+      color: var(--text);
+    }
+    .prose a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+    .prose a:hover { color: #5cb860; }
+    .prose .callout {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--accent);
+      border-radius: var(--radius);
+      padding: 16px 20px;
+      margin: 0 0 var(--space-3);
+    }
+    .prose .callout p { margin: 0; color: var(--text); }
+    .prose hr {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: var(--space-5) 0;
+    }
+  </style>
+</head>
+<body>
+
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="nav">
+  <a class="nav-brand" href="index.html" aria-label="Potatofy home">
+    <img src="assets/icon48.png" alt="" class="nav-logo" width="28" height="28" />
+    <span class="nav-wordmark">Potatofy</span>
+  </a>
+  <nav class="nav-links" aria-label="Primary">
+    <a href="index.html#features">Features</a>
+    <a href="index.html#numbers">Results</a>
+    <a href="index.html#install">Install</a>
+    <a href="index.html#faq">FAQ</a>
+  </nav>
+  <a class="btn btn-ghost btn-github" href="https://github.com/Funnykid7/Potatofy-extension" target="_blank" rel="noopener">
+    <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8a8 8 0 0 0 5.47 7.59c.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+    <span>GitHub</span>
+  </a>
+</header>
+
+<main id="main">
+  <div class="prose">
+    <p class="eyebrow">Legal</p>
+    <h1>Privacy Policy</h1>
+    <p class="updated">Last updated: May 2026 · Version 1.1.4</p>
+
+    <div class="callout">
+      <p><strong>Short version:</strong> Potatofy collects nothing by default. No analytics, no telemetry, no servers. The only way any data leaves your device is if you explicitly opt into Chrome's built-in sync — which you can turn off at any time.</p>
+    </div>
+
+    <h2>What data Potatofy collects</h2>
+    <p><strong>Nothing, by default.</strong> The extension operates entirely on your device. It reads your browser's tab state, memory usage, and the URLs of pages you visit — but only locally, to decide which optimisations to apply. None of this is stored beyond the current session or transmitted anywhere.</p>
+
+    <h2>Local storage only</h2>
+    <p>Potatofy stores two things in <code>chrome.storage.local</code> on your device:</p>
+    <ul>
+      <li><strong>Settings</strong> — your feature toggle states and numeric thresholds (e.g. idle timeout, memory pressure level). No browsing history, no URLs, no page content.</li>
+      <li><strong>Stats counters</strong> — estimated counts of blocked requests, discarded tabs, and similar aggregate numbers used to show you the popup's savings display. These are heuristic estimates, not a log of your activity.</li>
+    </ul>
+    <p>This data never leaves your device unless you opt into sync (see below).</p>
+
+    <h2>Optional cloud sync (opt-in, off by default)</h2>
+    <p>If you enable <em>Sync settings to Google</em> in the popup, Potatofy mirrors your feature toggle settings to <code>chrome.storage.sync</code>. This uses Chrome's built-in sync infrastructure, which routes through Google's servers under Google's privacy policy. Potatofy does not operate any server; we have no access to this data.</p>
+    <p>What is synced when enabled:</p>
+    <ul>
+      <li>Feature toggle booleans (e.g. whether blocking is on or off)</li>
+      <li>Numeric thresholds (idle timeout minutes, memory pressure MB)</li>
+    </ul>
+    <p>What is <strong>never</strong> synced unless you explicitly turn on a second toggle (<em>Also sync site lists</em>):</p>
+    <ul>
+      <li>Your whitelist (the domains where Potatofy is disabled)</li>
+      <li>Per-site potato-mode settings (per-domain JS/image kill)</li>
+    </ul>
+    <p>These describe your browsing habits and default to local-only.</p>
+    <p><strong>To opt out:</strong> Toggle <em>Sync settings to Google</em> off in the popup. The extension immediately calls <code>chrome.storage.sync.clear()</code>, purging the synced copy from Google's servers. No data lingers.</p>
+
+    <h2>No analytics or telemetry</h2>
+    <p>Potatofy contains no analytics library, no crash reporter, no usage telemetry, and no remote logging of any kind. There is no server for us to send data to. You can verify this by reading the source: every network call in the extension is either a Chrome declarativeNetRequest rule (blocking outgoing requests) or a <code>fetch(chrome.runtime.getURL(...))</code> call that reads a file bundled inside the extension itself.</p>
+
+    <h2>No remote code</h2>
+    <p>All code and rules ship inside the extension package. The blocking rule lists (<code>rules/static-rules.json</code>, <code>rules/font-rules.json</code>, <code>rules/site-killers.json</code>) are bundled at install time and only updated when you update the extension through the Chrome Web Store. No rules are fetched from the network at runtime.</p>
+
+    <h2>Permissions and what they access</h2>
+    <p>The extension requests several Chrome permissions. Here is exactly what each one reads or writes:</p>
+    <ul>
+      <li><code>tabs</code> — reads tab URLs and active/audible/pinned state to decide which tabs to suspend. No page content is accessed.</li>
+      <li><code>storage</code> — reads and writes your settings and stats counters as described above.</li>
+      <li><code>alarms</code> — sets recurring timers for idle checks and stats flushes. No data is involved.</li>
+      <li><code>contentSettings</code> — writes per-site JavaScript and image blocking settings when you use "Kill JS here" or "Kill images here". Only the specific domain you request is affected.</li>
+      <li><code>declarativeNetRequest</code> — applies static and dynamic network blocking rules. No request content or URLs are read by the extension; the browser engine handles matching internally.</li>
+      <li><code>declarativeNetRequestFeedback</code> — polls <code>getMatchedRules()</code> once per minute to count how many rules fired. Only rule IDs and timestamps are returned — no request URLs, no page content.</li>
+      <li><code>system.memory</code> — reads the device's free RAM amount. Not stored, not transmitted.</li>
+      <li><code>windows</code> — iterates open browser windows to find the active tab in each window before discarding idle ones.</li>
+      <li><code>host_permissions: &lt;all_urls&gt;</code> — required for blocking rules to apply to any domain, and for the content script to run on every page to freeze background timers.</li>
+    </ul>
+
+    <h2>Children's privacy</h2>
+    <p>Potatofy does not collect any personal information from anyone, including children. There is nothing to collect.</p>
+
+    <h2>Changes to this policy</h2>
+    <p>If we ever change how data is handled in a meaningful way, we will update this page and bump the version number at the top. The extension's GitHub repository tracks the full history of this document.</p>
+
+    <h2>Contact</h2>
+    <p>Questions or concerns? Open an issue on <a href="https://github.com/Funnykid7/Potatofy-extension/issues" target="_blank" rel="noopener">GitHub</a>.</p>
+
+    <hr />
+    <p style="font-size:0.875rem;">Potatofy is open source (GPLv3). You can read every line of code at <a href="https://github.com/Funnykid7/Potatofy-extension" target="_blank" rel="noopener">github.com/Funnykid7/Potatofy-extension</a>.</p>
+  </div>
+</main>
+
+<footer class="foot">
+  <div class="foot-grid">
+    <div class="foot-brand">
+      <img src="assets/icon48.png" alt="" width="28" height="28" />
+      <div>
+        <p class="foot-name">Potatofy</p>
+        <p class="foot-tag">Made for Raspberry Pi and other potatoes.</p>
+      </div>
+    </div>
+    <div class="foot-links">
+      <a class="btn btn-ghost" href="https://github.com/Funnykid7/Potatofy-extension" target="_blank" rel="noopener">
+        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8a8 8 0 0 0 5.47 7.59c.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+        <span>View on GitHub</span>
+      </a>
+    </div>
+    <p class="foot-meta">GPLv3 licensed. No trackers on this page either. v1.1.4</p>
+  </div>
+</footer>
+
+</body>
+</html>
