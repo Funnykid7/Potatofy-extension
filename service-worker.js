@@ -1,11 +1,15 @@
 import { DEFAULT_SETTINGS, ALLOWED_THRESHOLDS, ALLOWED_PRESSURE_MB } from './lib/defaults.js';
-import { STATS_WEIGHTS, EMPTY_COUNTERS, computeSavings } from './lib/stats-weights.js';
+import { STATS_WEIGHTS, EMPTY_COUNTERS, computeSavings, median } from './lib/stats-weights.js';
 
 // Per-flush upper bound on stat increments. Guards against compromised content
 // scripts or buggy reporters from corrupting lifetime counters with absurd
 // values (e.g. Number.MAX_SAFE_INTEGER). Per-second pageload counts realistic
 // only into the low thousands; 100k gives ~50x headroom.
 const MAX_INCREMENT = 100_000;
+
+// Phase 3 — upper bound on a single heap measurement. V8's practical heap
+// limit is ~4 GB; 512 MB is a generous ceiling for any single feature's delta.
+const MAX_HEAP_FREED_BYTES = 512 * 1024 * 1024;
 
 // 1.1.3 — absolute counter ceiling. Even at MAX_INCREMENT per message and
 // the per-tab rate limit below, a long-lived attack could still inflate a
@@ -424,6 +428,22 @@ async function flushStatsHotToLocal() {
     try { await chrome.storage.session.set({ statsHot }); } catch (e) {}
     updateBadge();
   });
+}
+
+// Phase 3 — whitelisted feature names for heap measurements.
+const VALID_HEAP_FEATURES = new Set([
+  'animationsKilled', 'videosPaused', 'videosPreloadNoned',
+  'autoplayKilled', 'imagesLazied', 'siteKillerHits'
+]);
+
+// Phase 2 — validates that calibration data from content script has the
+// expected shape before writing to storage.
+function isValidCalibrationData(d) {
+  if (!d || typeof d !== 'object' || Array.isArray(d)) return false;
+  for (const k of ['trackers', 'ads', 'fonts', 'scripts', 'images']) {
+    if (!Number.isFinite(d[k]) || d[k] < 0) return false;
+  }
+  return true;
 }
 
 // 1.1.3 — per-tab rate limiter for STATS_INCREMENT. Returns true if the call
@@ -1177,14 +1197,7 @@ chrome.runtime.onSuspend.addListener(() => {
 
 // ---------- Messages ----------
 
-// ========== Phase 2: Bandwidth Calibration Helper ==========
-
-function median(arr) {
-  if (!arr || arr.length === 0) return 0;
-  const sorted = [...arr].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-}
+// ========== Message Handler ==========
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || !msg.type) return;
@@ -1362,8 +1375,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'CALIBRATE_BANDWIDTH') {
+    const tabId = sender && sender.tab ? sender.tab.id : null;
+    if (!statsRateAllow(tabId)) { sendResponse({ ok: true }); return false; }
     (async () => {
       try {
+        if (!isValidCalibrationData(msg.data)) return;
         const stored = await chrome.storage.local.get('calibrationHistory');
         const history = stored.calibrationHistory || [];
 
@@ -1387,23 +1403,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         console.warn('[Potatofy] Bandwidth calibration failed:', e);
       }
     })();
-    return true;
+    return false;
   }
 
   // ========== Phase 3: Heap Memory Measurement ==========
   if (msg.type === 'HEAP_MEASUREMENT') {
+    const tabId = sender && sender.tab ? sender.tab.id : null;
+    if (!statsRateAllow(tabId)) { sendResponse({ ok: true }); return false; }
     (async () => {
       try {
-        // Validate input: feature name must be whitelisted, freed must be a valid number
-        const VALID_FEATURES = new Set([
-          'animationsKilled', 'videosPaused', 'videosPreloadNoned',
-          'autoplayKilled', 'imagesLazied', 'siteKillerHits'
-        ]);
         const feature = msg.feature;
         const freed = msg.freed;
 
-        // Reject if feature is not whitelisted or freed is not a valid positive number
-        if (!VALID_FEATURES.has(feature) || !Number.isFinite(freed) || freed < 0) {
+        if (!VALID_HEAP_FEATURES.has(feature) || !Number.isFinite(freed) || freed <= 0 || freed > MAX_HEAP_FREED_BYTES) {
           return;
         }
 
@@ -1416,9 +1428,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           timestamp: Date.now()
         });
 
-        // Keep rolling window of last 50 measurements per feature
-        if (measurements[feature].length > 50) {
-          measurements[feature] = measurements[feature].slice(-50);
+        // Keep rolling window of last 100 measurements per feature.
+        if (measurements[feature].length > 100) {
+          measurements[feature] = measurements[feature].slice(-100);
         }
 
         await chrome.storage.local.set({ heapMeasurements: measurements });
@@ -1426,7 +1438,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         console.warn('[Potatofy] Heap measurement storage failed:', e);
       }
     })();
-    return true;
+    return false;
   }
 });
 

@@ -706,34 +706,40 @@
     ensureVisibilityListener();
 
     if (settings.animationKillEnabled) {
+      const _hb = performance.memory ? performance.memory.usedJSHeapSize : 0;
       applyAnimationKill();
-      measureHeapDelta('animationsKilled');
+      measureHeapDelta('animationsKilled', _hb);
     } else removeAnimationKill();
     if (settings.siteKillersEnabled && settings.siteKillers.length > 0) {
+      const _hb = performance.memory ? performance.memory.usedJSHeapSize : 0;
       applySiteKillers();
-      measureHeapDelta('siteKillerHits');
+      measureHeapDelta('siteKillerHits', _hb);
     } else removeSiteKillers();
 
     // L-3 — only walk the document when an image-modifying feature is actually
     // on. restoreImageQuality is a cheap no-op when the WeakMap is empty, so we
     // avoid the apply-then-immediately-restore churn that ran every applyAll.
     if (settings.imageLazyEnabled || settings.imageLowQualityEnabled) {
+      const _hb = performance.memory ? performance.memory.usedJSHeapSize : 0;
       applyImageLazyAll(document);
-      measureHeapDelta('imagesLazied');
+      measureHeapDelta('imagesLazied', _hb);
     }
     if (!settings.imageLowQualityEnabled) restoreImageQuality();
     if (settings.prefetchStripEnabled) applyPrefetchStripAll(document);
     if (settings.autoplayKillEnabled) {
+      const _hb = performance.memory ? performance.memory.usedJSHeapSize : 0;
       killAutoplayAll(document);
-      measureHeapDelta('autoplayKilled');
+      measureHeapDelta('autoplayKilled', _hb);
     }
     if (settings.videoPreloadNoneEnabled) {
+      const _hb = performance.memory ? performance.memory.usedJSHeapSize : 0;
       applyVideoPreloadNoneAll(document);
-      measureHeapDelta('videosPreloadNoned');
+      measureHeapDelta('videosPreloadNoned', _hb);
     }
     if (settings.videoPauseEnabled && isHidden()) {
+      const _hb = performance.memory ? performance.memory.usedJSHeapSize : 0;
       pauseAllVideos(document);
-      measureHeapDelta('videosPaused');
+      measureHeapDelta('videosPaused', _hb);
     }
 
     if (anyContentFeatureEnabled()) startObserver(); else stopObserver();
@@ -826,6 +832,7 @@
   }
 
   function sendCalibrationData() {
+    if (!IS_TOP_FRAME) return; // dedupe across same-origin iframes
     if (!Object.values(resourceStats).some(arr => arr.length > 0)) return;
 
     const calibration = {
@@ -857,8 +864,9 @@
     resourceStats.images = [];
   }
 
+  // Median helper (local copy for IIFE context; lib version used by service-worker.js)
   function median(arr) {
-    if (arr.length === 0) return 0;
+    if (!Array.isArray(arr) || arr.length === 0) return 0;
     const sorted = [...arr].sort((a, b) => a - b);
     const mid = Math.floor(sorted.length / 2);
     return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
@@ -873,39 +881,37 @@
   setInterval(sendCalibrationData, 30000); // Send every 30 seconds
 
   // ========== Phase 3: Heap Memory Measurement ==========
-  // Measure actual JS heap freed by content features (non-blocking, async)
+  // Measure actual JS heap freed by content features (non-blocking, async).
+  //
+  // Strategy: Phase 3 (heap) measures on-demand after each feature application
+  // with delays for GC completion. Differs from Phase 2 (bandwidth) which uses
+  // fixed 30s interval across page loads. Asymmetry is intentional: heap is
+  // feature-specific and best measured immediately; bandwidth aggregates across
+  // multiple loads and benefits from longer intervals.
+  //
+  // Coverage: Measured features are animation kill, video pause/preload, autoplay,
+  // image lazy, and site killers. Unmeasured: prefetch (no heap delta), blocked
+  // requests (DNR rules, not content-driven), 3rd-party resources (DNR rules).
 
-  function measureHeapDelta(featureName) {
-    if (!performance.memory) return; // Chrome only, non-standard API
+  // heapBefore must be captured synchronously before the feature runs; this
+  // function then waits 200ms for GC before taking the after-snapshot.
+  // IS_TOP_FRAME guard deduplicates across same-origin iframes (all_frames: true).
+  function measureHeapDelta(featureName, heapBefore) {
+    if (!performance.memory || !IS_TOP_FRAME || !heapBefore) return;
 
-    // Schedule measurement asynchronously to avoid blocking user interaction.
-    // Note: GC timing is unpredictable; 200ms provides reasonable confidence but
-    // measurements represent conservative lower bounds, not exact freed memory.
-    setTimeout(() => {
+    _setTimeout(() => {
       try {
-        const heapBefore = performance.memory.usedJSHeapSize;
-
-        // Wait for GC to complete (200ms accommodates most typical heap sizes)
-        setTimeout(() => {
-          try {
-            const heapAfter = performance.memory.usedJSHeapSize;
-            const freed = Math.max(0, heapBefore - heapAfter);
-
-            if (freed > 0) {
-              chrome.runtime.sendMessage({
-                type: 'HEAP_MEASUREMENT',
-                feature: featureName,
-                freed: freed
-              }).catch(() => {});
-            }
-          } catch (e) {
-            // Silent fail
-          }
-        }, 200);
-      } catch (e) {
-        // Silent fail - measurement not available
-      }
-    }, 10);
+        const heapAfter = performance.memory.usedJSHeapSize;
+        const freed = Math.max(0, heapBefore - heapAfter);
+        if (freed > 0) {
+          chrome.runtime.sendMessage({
+            type: 'HEAP_MEASUREMENT',
+            feature: featureName,
+            freed: freed
+          }).catch(() => {});
+        }
+      } catch (e) {}
+    }, 200);
   }
 
   // N-1 — guard the call site so a synchronous throw (e.g. chrome.runtime
