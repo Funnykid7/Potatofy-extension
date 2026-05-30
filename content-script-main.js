@@ -110,9 +110,7 @@
         if (Number.isFinite(v) && v > 0) patch[k] = Math.min(Math.floor(v), MAX_INCREMENT);
       }
       if (Object.keys(patch).length === 0) return;
-      try {
-        chrome.runtime.sendMessage({ type: 'STATS_INCREMENT', patch });
-      } catch (e) {}
+      chrome.runtime.sendMessage({ type: 'STATS_INCREMENT', patch }).catch(() => {});
     }, 1000);
   }
 
@@ -812,15 +810,15 @@
           if (size === 0) continue;
 
           if (/google-analytics|facebook\.com|segment\.com|mixpanel|amplitude|hotjar|intercom|drift/.test(url)) {
-            resourceStats.trackers.push(size);
+            if (resourceStats.trackers.length < 500) resourceStats.trackers.push(size);
           } else if (/ads\.google|adswyzz|doubleclick|criteo|casalemedia|adform|appnexus|openx|rubiconproject|sonobi/.test(url)) {
-            resourceStats.ads.push(size);
+            if (resourceStats.ads.length < 500) resourceStats.ads.push(size);
           } else if (/\.woff2?|\.ttf|\.otf|fonts\.googleapis|fonts\.gstatic/.test(url)) {
-            resourceStats.fonts.push(size);
+            if (resourceStats.fonts.length < 500) resourceStats.fonts.push(size);
           } else if (/\.js$/.test(url)) {
-            resourceStats.scripts.push(size);
+            if (resourceStats.scripts.length < 500) resourceStats.scripts.push(size);
           } else if (/\.(jpg|jpeg|png|gif|webp|svg|ico)$/i.test(url)) {
-            resourceStats.images.push(size);
+            if (resourceStats.images.length < 500) resourceStats.images.push(size);
           }
         }
       });
@@ -872,13 +870,18 @@
     return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
   }
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initResourceObserver);
-  } else {
-    initResourceObserver();
-  }
+  // Phase 2/3 calibration is top-frame-only (sendCalibrationData returns early
+  // in sub-frames). Guarding the setInterval and observer here avoids creating
+  // a dormant 30-second timer in every iframe on pages like YouTube.
+  if (IS_TOP_FRAME) {
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initResourceObserver);
+    } else {
+      initResourceObserver();
+    }
 
-  setInterval(sendCalibrationData, 30000); // Send every 30 seconds
+    setInterval(sendCalibrationData, 30000); // Send every 30 seconds
+  }
 
   // ========== Phase 3: Heap Memory Measurement ==========
   // Measure actual JS heap freed by content features (non-blocking, async).

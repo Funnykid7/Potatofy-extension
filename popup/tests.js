@@ -154,7 +154,8 @@
       // exists. Skip this check when real measurements are present — the formula
       // is still consistent, just using measured values instead of STATS_WEIGHTS.
       const hasHeapData = heapMeasurements && Object.keys(heapMeasurements).length > 0;
-      if (hasHeapData) { return; }
+      const hasRealData = (stats.session.realRamFreed || 0) > 0;
+      if (hasHeapData || hasRealData) { return; }
       const s = stats.session, w = weights;
       const expectedRam =
         (s.blockedRequests          || 0) * w.request.ramBytes +

@@ -530,7 +530,7 @@ function bindStatsControls() {
 
 function bindStorageListener() {
   chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName === 'local' && changes.stats) {
+    if (areaName === 'local' && (changes.stats || changes.heapMeasurements)) {
       refreshStats();
     }
     if (areaName === 'local' && changes.settings) {

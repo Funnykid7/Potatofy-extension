@@ -11,6 +11,11 @@ const MAX_INCREMENT = 100_000;
 // limit is ~4 GB; 512 MB is a generous ceiling for any single feature's delta.
 const MAX_HEAP_FREED_BYTES = 512 * 1024 * 1024;
 
+// Phase 2 — upper bound per calibration category. Legitimate resource sizes
+// stay well below 100 MB; values above this indicate a spoofed message from
+// a page script trying to inflate the bandwidth-saved display.
+const MAX_CALIBRATION_BYTES = 100_000_000;
+
 // 1.1.3 — absolute counter ceiling. Even at MAX_INCREMENT per message and
 // the per-tab rate limit below, a long-lived attack could still inflate a
 // single counter past this without the ceiling. 1B is far above any plausible
@@ -25,6 +30,7 @@ const MAX_COUNTER_VALUE = 1_000_000_000;
 const STATS_RATE_WINDOW_MS = 10_000;
 const STATS_RATE_MAX = 500;
 const statsRateByTab = new Map(); // tabId -> { windowStart, count }
+const calibRateByTab = new Map(); // tabId -> { windowStart, count } — separate budget for calibration/heap
 
 const BOOLEAN_SETTING_KEYS = [
   'blockingEnabled', 'tabSuspendEnabled', 'jsThrottleEnabled',
@@ -32,7 +38,7 @@ const BOOLEAN_SETTING_KEYS = [
   'autoplayKillEnabled', 'prefetchStripEnabled', 'videoPauseEnabled',
   'videoPreloadNoneEnabled', 'thirdPartyScriptBlockEnabled',
   'foregroundPotatoEnabled', 'siteKillersEnabled', 'memoryPressureEnabled',
-  'useCloudSync', 'syncHostsToCloud'
+  'useCloudSync', 'syncHostsToCloud', 'privacyAccepted'
 ];
 
 const PRIVILEGED_MESSAGE_TYPES = new Set([
@@ -371,7 +377,7 @@ async function rehydrateStatsHot() {
     const s = await chrome.storage.session.get('statsHot');
     if (s.statsHot) {
       for (const k of Object.keys(s.statsHot)) {
-        statsHot[k] = s.statsHot[k];
+        if (k in EMPTY_COUNTERS) statsHot[k] = s.statsHot[k];
       }
     }
   } catch (e) {}
@@ -441,7 +447,7 @@ const VALID_HEAP_FEATURES = new Set([
 function isValidCalibrationData(d) {
   if (!d || typeof d !== 'object' || Array.isArray(d)) return false;
   for (const k of ['trackers', 'ads', 'fonts', 'scripts', 'images']) {
-    if (!Number.isFinite(d[k]) || d[k] < 0) return false;
+    if (!Number.isFinite(d[k]) || d[k] < 0 || d[k] > MAX_CALIBRATION_BYTES) return false;
   }
   return true;
 }
@@ -455,6 +461,21 @@ function statsRateAllow(tabId) {
   const entry = statsRateByTab.get(tabId);
   if (!entry || now - entry.windowStart > STATS_RATE_WINDOW_MS) {
     statsRateByTab.set(tabId, { windowStart: now, count: 1 });
+    return true;
+  }
+  if (entry.count >= STATS_RATE_MAX) return false;
+  entry.count++;
+  return true;
+}
+
+// Separate rate-limit bucket for CALIBRATE_BANDWIDTH and HEAP_MEASUREMENT so
+// a burst of DOM-mutation stats can't exhaust their budget and drop calibration data.
+function calibrationRateAllow(tabId) {
+  if (tabId == null) return true;
+  const now = Date.now();
+  const entry = calibRateByTab.get(tabId);
+  if (!entry || now - entry.windowStart > STATS_RATE_WINDOW_MS) {
+    calibRateByTab.set(tabId, { windowStart: now, count: 1 });
     return true;
   }
   if (entry.count >= STATS_RATE_MAX) return false;
@@ -1185,9 +1206,10 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   removeTabActivity(tabId);
   clearBoostForTab(tabId);
-  // H-2 — drop the per-tab rate-limit entry so statsRateByTab can't grow
+  // H-2 — drop the per-tab rate-limit entries so neither Map can grow
   // unbounded across a long session of opening/closing tabs.
   statsRateByTab.delete(tabId);
+  calibRateByTab.delete(tabId);
 });
 
 chrome.runtime.onSuspend.addListener(() => {
@@ -1250,6 +1272,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
     const safe = {};
     for (const k of Object.keys(EMPTY_COUNTERS)) {
+      if (k === 'realRamFreed') continue; // internal-only; written by SW, not content scripts
       const v = Number(msg.patch[k]);
       if (Number.isFinite(v) && v > 0 && v <= MAX_INCREMENT) safe[k] = Math.floor(v);
     }
@@ -1376,14 +1399,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === 'CALIBRATE_BANDWIDTH') {
     const tabId = sender && sender.tab ? sender.tab.id : null;
-    if (!statsRateAllow(tabId)) { sendResponse({ ok: true }); return false; }
+    if (!calibrationRateAllow(tabId)) { sendResponse({ ok: true }); return false; }
     (async () => {
       try {
         if (!isValidCalibrationData(msg.data)) return;
         const stored = await chrome.storage.local.get('calibrationHistory');
         const history = stored.calibrationHistory || [];
 
-        history.push(msg.data);
+        history.push({
+          trackers: msg.data.trackers,
+          ads:      msg.data.ads,
+          fonts:    msg.data.fonts,
+          scripts:  msg.data.scripts,
+          images:   msg.data.images,
+        });
         if (history.length > 100) history.shift();
 
         const aggregated = {
@@ -1409,7 +1438,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // ========== Phase 3: Heap Memory Measurement ==========
   if (msg.type === 'HEAP_MEASUREMENT') {
     const tabId = sender && sender.tab ? sender.tab.id : null;
-    if (!statsRateAllow(tabId)) { sendResponse({ ok: true }); return false; }
+    if (!calibrationRateAllow(tabId)) { sendResponse({ ok: true }); return false; }
     (async () => {
       try {
         const feature = msg.feature;

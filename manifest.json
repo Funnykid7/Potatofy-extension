@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "minimum_chrome_version": "88",
+  "minimum_chrome_version": "111",
   "name": "Potatofy",
   "version": "1.1.4",
   "description": "Reclaims RAM and bandwidth on Raspberry Pi and low-spec hardware. Blocks trackers, suspends idle tabs, freezes timers, kills bloat.",
