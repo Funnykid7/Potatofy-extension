@@ -1177,6 +1177,15 @@ chrome.runtime.onSuspend.addListener(() => {
 
 // ---------- Messages ----------
 
+// ========== Phase 2: Bandwidth Calibration Helper ==========
+
+function median(arr) {
+  if (!arr || arr.length === 0) return 0;
+  const sorted = [...arr].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || !msg.type) return;
 
@@ -1241,13 +1250,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       await flushStatsHotToLocal();
       const stats = await getStats();
       const cap = await getDeviceCapacityMB();
+      const storedCal = await chrome.storage.local.get('calibratedBandwidth');
+      const calibration = storedCal.calibratedBandwidth || null;
       sendResponse({
         stats,
         weights: STATS_WEIGHTS,
         deviceCapacityMB: cap,
+        calibration: calibration,
         savings: {
-          session:  computeSavings(stats.session),
-          lifetime: computeSavings(stats.lifetime)
+          session:  computeSavings(stats.session, calibration),
+          lifetime: computeSavings(stats.lifetime, calibration)
         }
       });
     })();
@@ -1341,6 +1353,35 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse({ ok: true, detail });
       } catch (e) {
         sendResponse({ ok: false });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.type === 'CALIBRATE_BANDWIDTH') {
+    (async () => {
+      try {
+        const stored = await chrome.storage.local.get('calibrationHistory');
+        const history = stored.calibrationHistory || [];
+
+        history.push(msg.data);
+        if (history.length > 100) history.shift();
+
+        const aggregated = {
+          trackers: median(history.map(h => h.trackers).filter(x => x > 0)),
+          ads: median(history.map(h => h.ads).filter(x => x > 0)),
+          fonts: median(history.map(h => h.fonts).filter(x => x > 0)),
+          scripts: median(history.map(h => h.scripts).filter(x => x > 0)),
+          images: median(history.map(h => h.images).filter(x => x > 0)),
+          lastUpdated: Date.now()
+        };
+
+        await chrome.storage.local.set({
+          calibrationHistory: history,
+          calibratedBandwidth: aggregated
+        });
+      } catch (e) {
+        console.warn('[Potatofy] Bandwidth calibration failed:', e);
       }
     })();
     return true;

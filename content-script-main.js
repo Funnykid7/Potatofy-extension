@@ -766,6 +766,95 @@
     applyAll();
   });
 
+  // ========== Phase 2: Bandwidth Calibration ==========
+  // Collect real resource sizes for bandwidth calibration
+
+  const resourceStats = {
+    trackers: [],
+    ads: [],
+    fonts: [],
+    scripts: [],
+    images: []
+  };
+
+  function initResourceObserver() {
+    if (typeof PerformanceObserver === 'undefined') return;
+
+    try {
+      const observer = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          if (entry.transferSize === 0) continue; // Cached, skip
+          const url = entry.name;
+          const size = entry.transferSize || entry.decodedBodySize || 0;
+          if (size === 0) continue;
+
+          if (/google-analytics|facebook\.com|segment\.com|mixpanel|amplitude|hotjar|intercom|drift/.test(url)) {
+            resourceStats.trackers.push(size);
+          } else if (/ads\.google|adswyzz|doubleclick|criteo|casalemedia|adform|appnexus|openx|rubiconproject|sonobi/.test(url)) {
+            resourceStats.ads.push(size);
+          } else if (/\.woff2?|\.ttf|\.otf|fonts\.googleapis|fonts\.gstatic/.test(url)) {
+            resourceStats.fonts.push(size);
+          } else if (/\.js$/.test(url)) {
+            resourceStats.scripts.push(size);
+          } else if (/\.(jpg|jpeg|png|gif|webp|svg|ico)$/i.test(url)) {
+            resourceStats.images.push(size);
+          }
+        }
+      });
+
+      observer.observe({ entryTypes: ['resource'] });
+    } catch (e) {
+      // PerformanceObserver not available or failed
+    }
+  }
+
+  function sendCalibrationData() {
+    if (!Object.values(resourceStats).some(arr => arr.length > 0)) return;
+
+    const calibration = {
+      trackers: median(resourceStats.trackers),
+      ads: median(resourceStats.ads),
+      fonts: median(resourceStats.fonts),
+      scripts: median(resourceStats.scripts),
+      images: median(resourceStats.images),
+      timestamp: Date.now(),
+      counts: {
+        trackers: resourceStats.trackers.length,
+        ads: resourceStats.ads.length,
+        fonts: resourceStats.fonts.length,
+        scripts: resourceStats.scripts.length,
+        images: resourceStats.images.length
+      }
+    };
+
+    chrome.runtime.sendMessage({
+      type: 'CALIBRATE_BANDWIDTH',
+      data: calibration
+    }).catch(() => {}); // Silent fail
+
+    // Reset for next batch
+    resourceStats.trackers = [];
+    resourceStats.ads = [];
+    resourceStats.fonts = [];
+    resourceStats.scripts = [];
+    resourceStats.images = [];
+  }
+
+  function median(arr) {
+    if (arr.length === 0) return 0;
+    const sorted = [...arr].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initResourceObserver);
+  } else {
+    initResourceObserver();
+  }
+
+  setInterval(sendCalibrationData, 30000); // Send every 30 seconds
+
   // N-1 — guard the call site so a synchronous throw (e.g. chrome.runtime
   // unavailable mid-load) can't surface as an unhandled rejection.
   init().catch(() => {});
