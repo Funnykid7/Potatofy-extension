@@ -1252,14 +1252,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const cap = await getDeviceCapacityMB();
       const storedCal = await chrome.storage.local.get('calibratedBandwidth');
       const calibration = storedCal.calibratedBandwidth || null;
+      const storedHeap = await chrome.storage.local.get('heapMeasurements');
+      const heapMeasurements = storedHeap.heapMeasurements || null;
       sendResponse({
         stats,
         weights: STATS_WEIGHTS,
         deviceCapacityMB: cap,
         calibration: calibration,
+        heapMeasurements: heapMeasurements,
         savings: {
-          session:  computeSavings(stats.session, calibration),
-          lifetime: computeSavings(stats.lifetime, calibration)
+          session:  computeSavings(stats.session, calibration, heapMeasurements),
+          lifetime: computeSavings(stats.lifetime, calibration, heapMeasurements)
         }
       });
     })();
@@ -1382,6 +1385,33 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         });
       } catch (e) {
         console.warn('[Potatofy] Bandwidth calibration failed:', e);
+      }
+    })();
+    return true;
+  }
+
+  // ========== Phase 3: Heap Memory Measurement ==========
+  if (msg.type === 'HEAP_MEASUREMENT') {
+    (async () => {
+      try {
+        const stored = await chrome.storage.local.get('heapMeasurements');
+        const measurements = stored.heapMeasurements || {};
+
+        const feature = msg.feature;
+        measurements[feature] = measurements[feature] || [];
+        measurements[feature].push({
+          freed: msg.freed,
+          timestamp: Date.now()
+        });
+
+        // Keep rolling window of last 50 measurements per feature
+        if (measurements[feature].length > 50) {
+          measurements[feature] = measurements[feature].slice(-50);
+        }
+
+        await chrome.storage.local.set({ heapMeasurements: measurements });
+      } catch (e) {
+        console.warn('[Potatofy] Heap measurement storage failed:', e);
       }
     })();
     return true;

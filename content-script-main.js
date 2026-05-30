@@ -705,19 +705,36 @@
     }
     ensureVisibilityListener();
 
-    if (settings.animationKillEnabled) applyAnimationKill(); else removeAnimationKill();
-    if (settings.siteKillersEnabled && settings.siteKillers.length > 0) applySiteKillers();
-    else removeSiteKillers();
+    if (settings.animationKillEnabled) {
+      applyAnimationKill();
+      measureHeapDelta('animationsKilled');
+    } else removeAnimationKill();
+    if (settings.siteKillersEnabled && settings.siteKillers.length > 0) {
+      applySiteKillers();
+      measureHeapDelta('siteKillerHits');
+    } else removeSiteKillers();
 
     // L-3 — only walk the document when an image-modifying feature is actually
     // on. restoreImageQuality is a cheap no-op when the WeakMap is empty, so we
     // avoid the apply-then-immediately-restore churn that ran every applyAll.
-    if (settings.imageLazyEnabled || settings.imageLowQualityEnabled) applyImageLazyAll(document);
+    if (settings.imageLazyEnabled || settings.imageLowQualityEnabled) {
+      applyImageLazyAll(document);
+      measureHeapDelta('imagesLazied');
+    }
     if (!settings.imageLowQualityEnabled) restoreImageQuality();
     if (settings.prefetchStripEnabled) applyPrefetchStripAll(document);
-    if (settings.autoplayKillEnabled) killAutoplayAll(document);
-    if (settings.videoPreloadNoneEnabled) applyVideoPreloadNoneAll(document);
-    if (settings.videoPauseEnabled && isHidden()) pauseAllVideos(document);
+    if (settings.autoplayKillEnabled) {
+      killAutoplayAll(document);
+      measureHeapDelta('autoplayKilled');
+    }
+    if (settings.videoPreloadNoneEnabled) {
+      applyVideoPreloadNoneAll(document);
+      measureHeapDelta('videosPreloadNoned');
+    }
+    if (settings.videoPauseEnabled && isHidden()) {
+      pauseAllVideos(document);
+      measureHeapDelta('videosPaused');
+    }
 
     if (anyContentFeatureEnabled()) startObserver(); else stopObserver();
 
@@ -854,6 +871,40 @@
   }
 
   setInterval(sendCalibrationData, 30000); // Send every 30 seconds
+
+  // ========== Phase 3: Heap Memory Measurement ==========
+  // Measure actual JS heap freed by content features (non-blocking, async)
+
+  function measureHeapDelta(featureName) {
+    if (!performance.memory) return; // Chrome only, non-standard API
+
+    // Schedule measurement asynchronously to avoid blocking user interaction
+    setTimeout(() => {
+      try {
+        const heapBefore = performance.memory.usedJSHeapSize;
+
+        // Wait for GC to complete before measuring
+        setTimeout(() => {
+          try {
+            const heapAfter = performance.memory.usedJSHeapSize;
+            const freed = Math.max(0, heapBefore - heapAfter);
+
+            if (freed > 0) {
+              chrome.runtime.sendMessage({
+                type: 'HEAP_MEASUREMENT',
+                feature: featureName,
+                freed: freed
+              }).catch(() => {});
+            }
+          } catch (e) {
+            // Silent fail
+          }
+        }, 50);
+      } catch (e) {
+        // Silent fail - measurement not available
+      }
+    }, 10);
+  }
 
   // N-1 — guard the call site so a synchronous throw (e.g. chrome.runtime
   // unavailable mid-load) can't surface as an unhandled rejection.
