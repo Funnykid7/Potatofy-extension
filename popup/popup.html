@@ -16,7 +16,7 @@
       </div>
     </header>
 
-    <section class="popup-stats" id="stats-section">
+    <section class="popup-stats">
       <div class="popup-stats-head">
         <span class="popup-stats-label">
           <select id="stats-scope" class="stats-scope" aria-label="Stats scope">
@@ -240,10 +240,18 @@
 
         <div class="popup-toggle">
           <div class="popup-toggle-text">
-            <label for="toggle-cloud-sync">Sync to Google</label>
-            <p>Off keeps settings on this device only.</p>
+            <label for="toggle-cloud-sync">Sync settings to Google</label>
+            <p>Syncs feature toggles only. Site lists stay on this device.</p>
           </div>
           <label class="sw-wrap"><input type="checkbox" id="toggle-cloud-sync"><span class="sw"></span></label>
+        </div>
+
+        <div class="popup-toggle">
+          <div class="popup-toggle-text">
+            <label for="toggle-sync-hosts">Also sync site lists</label>
+            <p>Whitelist + potato-mode hosts will be stored in Google's cloud.</p>
+          </div>
+          <label class="sw-wrap"><input type="checkbox" id="toggle-sync-hosts"><span class="sw"></span></label>
         </div>
 
         <details class="nested-list">
@@ -270,6 +278,7 @@
 
   </div>
 
+  <script src="../lib/formatters.js"></script>
   <script src="tests.js"></script>
   <script type="module" src="popup.js"></script>
 </body>

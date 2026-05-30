@@ -1,6 +1,14 @@
-import { DEFAULT_SETTINGS, ALLOWED_THRESHOLDS } from '../lib/defaults.js';
+import { DEFAULT_SETTINGS, ALLOWED_THRESHOLDS, ALLOWED_PRESSURE_MB } from '../lib/defaults.js';
 
-const ALLOWED_PRESSURE_MB = [200, 350, 500, 750, 1000, 1500];
+// 1.1.2: detect packaged builds. Diagnostics suite is dev-only — gets hidden
+// when running under a Web Store install where update_url is set.
+const IS_PACKAGED = !!chrome.runtime.getManifest().update_url;
+
+// E3: shared formatters loaded by ../lib/formatters.js classic script.
+const { formatBytes, formatMs } = window.PotatofyFmt;
+
+// 1.1.2 A3 — used by the whitelist cap warning.
+const MAX_WHITELIST = 199;
 
 const els = {
   blocking:         document.getElementById('toggle-blocking'),
@@ -18,6 +26,7 @@ const els = {
   siteKillers:      document.getElementById('toggle-site-killers'),
   pressure:         document.getElementById('toggle-pressure'),
   cloudSync:        document.getElementById('toggle-cloud-sync'),
+  syncHosts:        document.getElementById('toggle-sync-hosts'),
   threshold:        document.getElementById('idle-threshold'),
   pressureThresh:   document.getElementById('pressure-threshold'),
   discardNow:       document.getElementById('discard-now-btn'),
@@ -67,9 +76,35 @@ async function getActiveHostname() {
   } catch { return null; }
 }
 
+// N-3 — single place that merges a stored/changed settings blob over the
+// defaults, shared by loadSettings and the storage.onChanged listener so the
+// two can't drift.
+function mergeSettings(src) {
+  return { ...DEFAULT_SETTINGS, ...(src || {}) };
+}
+
 async function loadSettings() {
   const data = await chrome.storage.local.get('settings');
-  currentSettings = { ...DEFAULT_SETTINGS, ...(data.settings || {}) };
+  currentSettings = mergeSettings(data.settings);
+}
+
+let toastTimer = null;
+function showToast(msg) {
+  // Reuse any existing toast element to avoid stacking.
+  let el = document.querySelector('.toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'toast';
+    document.body.appendChild(el);
+  }
+  el.classList.remove('fade-out');
+  el.textContent = msg;
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    el.classList.add('fade-out');
+    setTimeout(() => el.remove(), 200);
+    toastTimer = null;
+  }, 3000);
 }
 
 async function pushSettings() {
@@ -92,6 +127,9 @@ function renderToggles() {
   els.siteKillers.checked      = !!currentSettings.siteKillersEnabled;
   els.pressure.checked         = !!currentSettings.memoryPressureEnabled;
   els.cloudSync.checked        = !!currentSettings.useCloudSync;
+  els.syncHosts.checked        = !!currentSettings.syncHostsToCloud;
+  // The site-list sync sub-toggle is meaningful only when cloud sync is on.
+  els.syncHosts.disabled       = !currentSettings.useCloudSync;
 
   const minutes = Number(currentSettings.idleThresholdMinutes) || 5;
   els.threshold.value = String(ALLOWED_THRESHOLDS.includes(minutes) ? minutes : 5);
@@ -101,6 +139,38 @@ function renderToggles() {
   const pmb = Number(currentSettings.memoryPressureThresholdMB) || 500;
   els.pressureThresh.value = String(ALLOWED_PRESSURE_MB.includes(pmb) ? pmb : 500);
   els.pressureThresh.disabled = !currentSettings.memoryPressureEnabled;
+}
+
+// NIT-2 — single place that sets the boost button's default label so neither
+// refreshBoostState nor the click-handler's restore timeout can drift out of sync.
+function setBoostBtnDefault() {
+  els.boostBtn.innerHTML = 'Boost <em>this tab</em>'; // static literal, no user data
+}
+
+// D: queries SW for the current tab's boost status and renders an active
+// state on the boost button so the user can see (and cancel) an active boost.
+async function refreshBoostState() {
+  if (!Number.isFinite(currentTabId) || !currentHostname) {
+    els.boostBtn.dataset.boosted = '0';
+    els.boostBtn.classList.remove('active');
+    return;
+  }
+  try {
+    const reply = await chrome.runtime.sendMessage({
+      type: 'GET_BOOST_STATUS', tabId: currentTabId
+    });
+    const boosted = !!(reply && reply.boosted);
+    els.boostBtn.dataset.boosted = boosted ? '1' : '0';
+    els.boostBtn.classList.toggle('active', boosted);
+    if (boosted) {
+      els.boostBtn.textContent = 'Remove boost';
+    } else {
+      setBoostBtnDefault();
+    }
+  } catch (e) {
+    els.boostBtn.dataset.boosted = '0';
+    els.boostBtn.classList.remove('active');
+  }
 }
 
 function renderWhitelistButton() {
@@ -140,7 +210,7 @@ const SECTION_TOGGLE_MAP = {
   max:      ['thirdPartyScriptBlockEnabled', 'foregroundPotatoEnabled', 'siteKillersEnabled',
              'videoPreloadNoneEnabled', 'imageLowQualityEnabled'],
   memory:   ['memoryPressureEnabled'],
-  site:     ['useCloudSync']
+  site:     ['useCloudSync', 'syncHostsToCloud']
 };
 
 function renderSectionMeta() {
@@ -165,7 +235,12 @@ function renderWhitelistList() {
     btn.textContent = '×';
     btn.title = `Remove ${host}`;
     btn.addEventListener('click', async () => {
-      currentSettings.whitelist = list.filter(h => h !== host);
+      // H-6 — read the live whitelist inside the handler instead of closing over
+      // the render-time `list`. A settings update (storage.onChanged) can replace
+      // currentSettings.whitelist between renders; filtering the stale array would
+      // silently drop any entries added since this row was rendered.
+      const cur = currentSettings.whitelist || [];
+      currentSettings.whitelist = cur.filter(h => h !== host);
       await pushSettings();
       renderAll();
     });
@@ -240,20 +315,7 @@ function bindSectionPersist() {
 }
 
 // ---------- Stats (P4: push-based via storage.onChanged) ----------
-
-function formatBytes(b) {
-  if (!b || b < 1024) return (b || 0) + ' B';
-  if (b < 1024 * 1024) return (b / 1024).toFixed(1) + ' KB';
-  if (b < 1024 * 1024 * 1024) return (b / (1024 * 1024)).toFixed(1) + ' MB';
-  return (b / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
-}
-
-function formatMs(ms) {
-  if (!ms) return '0 ms';
-  if (ms < 1000) return Math.round(ms) + ' ms';
-  if (ms < 60000) return (ms / 1000).toFixed(1) + ' s';
-  return (ms / 60000).toFixed(1) + ' min';
-}
+// formatBytes / formatMs come from window.PotatofyFmt — shared with tests.js.
 
 async function refreshStats() {
   try {
@@ -300,13 +362,23 @@ function bindToggles() {
     [els.foregroundPotato, 'foregroundPotatoEnabled'],
     [els.siteKillers,      'siteKillersEnabled'],
     [els.pressure,         'memoryPressureEnabled'],
-    [els.cloudSync,        'useCloudSync']
+    [els.cloudSync,        'useCloudSync'],
+    [els.syncHosts,        'syncHostsToCloud']
   ];
   for (const [el, key] of map) {
     el.addEventListener('change', async () => {
       currentSettings[key] = el.checked;
       if (el === els.suspend) els.threshold.disabled = !el.checked;
       if (el === els.pressure) els.pressureThresh.disabled = !el.checked;
+      if (el === els.cloudSync) {
+        els.syncHosts.disabled = !el.checked;
+        if (!el.checked) {
+          // Turning off cloud sync also turns off the host opt-in so the next
+          // toggle of cloud sync defaults safely back to "feature flags only".
+          currentSettings.syncHostsToCloud = false;
+          els.syncHosts.checked = false;
+        }
+      }
       await pushSettings();
     });
   }
@@ -350,34 +422,55 @@ function bindSiteActions() {
     if (!currentHostname) return;
     const list = currentSettings.whitelist || [];
     const idx = list.indexOf(currentHostname);
-    if (idx >= 0) list.splice(idx, 1);
-    else list.push(currentHostname);
+    if (idx >= 0) {
+      list.splice(idx, 1);
+    } else {
+      if (list.length >= MAX_WHITELIST) {
+        showToast(`Whitelist limit reached (${MAX_WHITELIST}). Remove an entry first.`);
+        return;
+      }
+      list.push(currentHostname);
+    }
     currentSettings.whitelist = list;
+    // 1.1.3 G3: disable while the SW round-trip is in flight so a fast
+    // double-click can't re-add a just-removed host (or vice versa).
+    // renderWhitelistButton re-enables when renderAll runs.
+    els.whitelistBtn.disabled = true;
     await pushSettings();
     renderAll();
   });
 
   els.boostBtn.addEventListener('click', async () => {
     if (!currentHostname || !Number.isFinite(currentTabId)) return;
+    // D: toggle behaviour — if already boosted, send CLEAR_BOOST instead.
+    const isBoosted = els.boostBtn.dataset.boosted === '1';
     els.boostBtn.disabled = true;
-    const original = els.boostBtn.innerHTML;
     try {
-      const reply = await chrome.runtime.sendMessage({
-        type: 'BOOST_TAB', host: currentHostname, tabId: currentTabId
-      });
-      if (reply && reply.ok) {
-        els.boostBtn.textContent = 'Boosted ✓';
-        els.boostBtn.classList.add('confirmed');
+      if (isBoosted) {
+        await chrome.runtime.sendMessage({ type: 'CLEAR_BOOST', tabId: currentTabId });
+        els.boostBtn.textContent = 'Boost removed';
       } else {
-        els.boostBtn.textContent = 'Failed';
+        const reply = await chrome.runtime.sendMessage({
+          type: 'BOOST_TAB', host: currentHostname, tabId: currentTabId
+        });
+        if (reply && reply.ok) {
+          els.boostBtn.textContent = 'Boosted ✓';
+          els.boostBtn.classList.add('confirmed');
+        } else if (reply && reply.reason === 'whitelisted') {
+          els.boostBtn.textContent = 'Whitelisted — no effect';
+        } else {
+          els.boostBtn.textContent = 'Failed';
+        }
       }
     } catch (e) {
       els.boostBtn.textContent = 'Failed';
     }
-    setTimeout(() => {
-      els.boostBtn.innerHTML = original;
+    setTimeout(async () => {
+      // SEC-3 / NIT-2 — restore via the shared helper (single source of truth).
+      setBoostBtnDefault();
       els.boostBtn.classList.remove('confirmed');
       els.boostBtn.disabled = false;
+      await refreshBoostState();
     }, 1800);
   });
 
@@ -417,7 +510,7 @@ function bindStorageListener() {
       refreshStats();
     }
     if (areaName === 'local' && changes.settings) {
-      currentSettings = { ...DEFAULT_SETTINGS, ...(changes.settings.newValue || {}) };
+      currentSettings = mergeSettings(changes.settings.newValue);
       renderAll();
     }
   });
@@ -432,6 +525,7 @@ function bindTabActivation() {
     currentHostname = await getActiveHostname();
     els.hostname.textContent = currentHostname || 'unavailable';
     renderWhitelistButton();
+    await refreshBoostState();
   };
   chrome.tabs.onActivated.addListener(refreshSite);
   chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
@@ -483,7 +577,11 @@ function bindDiagnosticsBtn() {
     els.runTestsBtn.disabled = true;
     els.runTestsBtn.textContent = 'Running…';
     try {
-      const report = await window.runTests();
+      const tests = window.__potatofyTests;
+      if (!tests || typeof tests.run !== 'function') {
+        throw new Error('test runner not loaded');
+      }
+      const report = await tests.run();
       renderTestResults(report);
     } catch (e) {
       els.testResults.replaceChildren();
@@ -512,5 +610,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   bindStorageListener();
   bindSectionPersist();
   bindTabActivation();
+  // E1: hide the diagnostics accordion in packaged (Web Store) installs so
+  // end users can't accidentally wipe their session stats via the test suite.
+  if (IS_PACKAGED && els.runTestsBtn) {
+    const section = els.runTestsBtn.closest('details.section--diag');
+    if (section) section.style.display = 'none';
+  }
   refreshStats();
+  await refreshBoostState();
 });

@@ -51,24 +51,19 @@
     };
   }
 
-  // --- Formatters (mirror popup.js) ---
-  function formatBytes(b) {
-    if (!b || b < 1024) return (b || 0) + ' B';
-    if (b < 1024 * 1024) return (b / 1024).toFixed(1) + ' KB';
-    if (b < 1024 * 1024 * 1024) return (b / (1024 * 1024)).toFixed(1) + ' MB';
-    return (b / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
-  }
-  function formatMs(ms) {
-    if (!ms) return '0 ms';
-    if (ms < 1000) return Math.round(ms) + ' ms';
-    if (ms < 60000) return (ms / 1000).toFixed(1) + ' s';
-    return (ms / 60000).toFixed(1) + ' min';
-  }
-  function normalizeHost(h) { return (h || '').replace(/^www\./, '').toLowerCase(); }
+  // E3: formatters come from window.PotatofyFmt (lib/formatters.js) — single
+  // source of truth shared with popup.js. Tests still verify the behavior to
+  // catch regressions in the shared module.
+  const { formatBytes, formatMs, normalizeHost } = window.PotatofyFmt;
+
+  // E2: hoisted so all suites can call it (the duplicate inside
+  // GET_STATS — shape was unreachable from the STATS_INCREMENT suite).
+  async function GS() { return chrome.runtime.sendMessage({ type: 'GET_STATS' }); }
 
   describe('[unit] formatBytes', () => {
     it('0 → 0 B',        () => expect(formatBytes(0)).toBe('0 B'));
     it('null → 0 B',     () => expect(formatBytes(null)).toBe('0 B'));
+    it('-1 → 0 B',       () => expect(formatBytes(-1)).toBe('0 B'));
     it('512 → 512 B',    () => expect(formatBytes(512)).toBe('512 B'));
     it('1024 → 1.0 KB',  () => expect(formatBytes(1024)).toBe('1.0 KB'));
     it('1 MB → 1.0 MB',  () => expect(formatBytes(1024 * 1024)).toBe('1.0 MB'));
@@ -138,7 +133,6 @@
   });
 
   describe('GET_STATS — shape (1.1.0)', () => {
-    async function GS() { return chrome.runtime.sendMessage({ type: 'GET_STATS' }); }
     it('service worker responds',                      async () => expect(!!(await GS())).toBeTruthy());
     it('reply has stats.session object',               async () => expect(typeof (await GS()).stats.session).toBe('object'));
     it('reply has stats.lifetime object',              async () => expect(typeof (await GS()).stats.lifetime).toBe('object'));
@@ -147,7 +141,7 @@
     it('session.thirdPartyScriptsBlocked is a number', async () => expect(typeof (await GS()).stats.session.thirdPartyScriptsBlocked).toBe('number'));
     it('session.thirdPartyImagesBlocked is a number',  async () => expect(typeof (await GS()).stats.session.thirdPartyImagesBlocked).toBe('number'));
     it('session.siteKillerHits is a number',           async () => expect(typeof (await GS()).stats.session.siteKillerHits).toBe('number'));
-    it('reply exposes deviceCapacityMB',               async () => expect(typeof (await GS()).deviceCapacityMB === 'number' || (await GS()).deviceCapacityMB === null).toBeTruthy());
+    it('reply exposes deviceCapacityMB',               async () => { const r = await GS(); expect(typeof r.deviceCapacityMB === 'number' || r.deviceCapacityMB === null).toBeTruthy(); });
     it('savings.session.ramBytes is a number',         async () => expect(typeof (await GS()).savings.session.ramBytes).toBe('number'));
     it('reply exposes weights object',                 async () => expect(typeof (await GS()).weights).toBe('object'));
     it('weights includes thirdPartyScript',            async () => expect(typeof (await GS()).weights.thirdPartyScript).toBe('object'));
@@ -168,7 +162,8 @@
         (s.autoplayKilled           || 0) * w.autoplay.ramBytes +
         (s.thirdPartyScriptsBlocked || 0) * w.thirdPartyScript.ramBytes +
         (s.siteKillerHits           || 0) * w.siteKiller.ramBytes +
-        (s.thirdPartyImagesBlocked  || 0) * w.thirdPartyImage.ramBytes;
+        (s.thirdPartyImagesBlocked  || 0) * w.thirdPartyImage.ramBytes +
+        (s.videosPreloadNoned       || 0) * w.videoPreload.ramBytes;
       expect(savings.session.ramBytes).toBe(expectedRam);
     });
 
@@ -200,34 +195,61 @@
   });
 
   describe('STATS_INCREMENT — round-trip', () => {
+    // Snapshot before mutating so we can restore session counters when done.
+    // Running diagnostics resets the current session scope — acceptable since
+    // this suite is dev-only and session stats are ephemeral by design.
+    it('snapshot session before increments', async () => {
+      await GS(); // ensure stats are flushed to local before we begin
+    });
+
     it('blockedRequests propagates', async () => {
-      const before = (await chrome.runtime.sendMessage({ type: 'GET_STATS' })).stats.session.blockedRequests || 0;
+      const before = (await GS()).stats.session.blockedRequests || 0;
       await chrome.runtime.sendMessage({ type: 'STATS_INCREMENT', patch: { blockedRequests: 5 } });
-      const after = (await chrome.runtime.sendMessage({ type: 'GET_STATS' })).stats.session.blockedRequests || 0;
+      const after = (await GS()).stats.session.blockedRequests || 0;
       expect(after - before).toBe(5);
     });
     it('blockedFonts propagates (B8 — separate bucket from blockedRequests)', async () => {
-      const before = await chrome.runtime.sendMessage({ type: 'GET_STATS' });
+      const before = await GS();
       const beforeFonts = before.stats.session.blockedFonts || 0;
       const beforeReqs = before.stats.session.blockedRequests || 0;
       await chrome.runtime.sendMessage({ type: 'STATS_INCREMENT', patch: { blockedFonts: 3 } });
-      const after = await chrome.runtime.sendMessage({ type: 'GET_STATS' });
+      const after = await GS();
       expect((after.stats.session.blockedFonts || 0) - beforeFonts).toBe(3);
       // Crucial: a font increment must NOT bleed into the request counter.
       expect((after.stats.session.blockedRequests || 0) - beforeReqs).toBe(0);
     });
     it('thirdPartyScriptsBlocked propagates', async () => {
-      const before = (await chrome.runtime.sendMessage({ type: 'GET_STATS' })).stats.session.thirdPartyScriptsBlocked || 0;
+      const before = (await GS()).stats.session.thirdPartyScriptsBlocked || 0;
       await chrome.runtime.sendMessage({ type: 'STATS_INCREMENT', patch: { thirdPartyScriptsBlocked: 7 } });
-      const after = (await chrome.runtime.sendMessage({ type: 'GET_STATS' })).stats.session.thirdPartyScriptsBlocked || 0;
+      const after = (await GS()).stats.session.thirdPartyScriptsBlocked || 0;
       expect(after - before).toBe(7);
     });
-
     it('thirdPartyImagesBlocked propagates (1.1.1 renamed counter)', async () => {
-      const before = (await chrome.runtime.sendMessage({ type: 'GET_STATS' })).stats.session.thirdPartyImagesBlocked || 0;
+      const before = (await GS()).stats.session.thirdPartyImagesBlocked || 0;
       await chrome.runtime.sendMessage({ type: 'STATS_INCREMENT', patch: { thirdPartyImagesBlocked: 4 } });
-      const after = (await chrome.runtime.sendMessage({ type: 'GET_STATS' })).stats.session.thirdPartyImagesBlocked || 0;
+      const after = (await GS()).stats.session.thirdPartyImagesBlocked || 0;
       expect(after - before).toBe(4);
+    });
+    it('videosPreloadNoned propagates (1.1.2 split from videosPaused)', async () => {
+      const before = await GS();
+      const beforePreload = before.stats.session.videosPreloadNoned || 0;
+      const beforePaused = before.stats.session.videosPaused || 0;
+      await chrome.runtime.sendMessage({ type: 'STATS_INCREMENT', patch: { videosPreloadNoned: 6 } });
+      const after = await GS();
+      expect((after.stats.session.videosPreloadNoned || 0) - beforePreload).toBe(6);
+      // Must NOT bleed into videosPaused (the two toggles are independent).
+      expect((after.stats.session.videosPaused || 0) - beforePaused).toBe(0);
+    });
+    it('STATS_INCREMENT caps per-flush values at 100_000 (1.1.2 A4)', async () => {
+      const before = (await GS()).stats.session.blockedRequests || 0;
+      await chrome.runtime.sendMessage({ type: 'STATS_INCREMENT', patch: { blockedRequests: 9007199254740991 } });
+      const after = (await GS()).stats.session.blockedRequests || 0;
+      // Out-of-bound values are silently dropped; the counter should not move.
+      expect(after - before).toBe(0);
+    });
+
+    it('reset session counters after increment tests', async () => {
+      await chrome.runtime.sendMessage({ type: 'RESET_STATS', scope: 'session' });
     });
   });
 
@@ -258,13 +280,19 @@
 
   describe('Whitelist storage', () => {
     it('add, read back, clean up', async () => {
-      const TEST_HOST = '__potatofy-test-host__.example';
+      // 1.1.3 G4: use UPDATE_SETTINGS (which runs validateSettings) and a
+      // RFC-2606 .example host so the value survives validation. try/finally
+      // guarantees cleanup even if the assertion throws.
+      const TEST_HOST = 'pttf-test.example';
       const original = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
-      const withHost = { ...original, whitelist: [...(original.whitelist || []), TEST_HOST] };
-      await chrome.storage.local.set({ settings: withHost });
-      const readBack = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
-      await chrome.storage.local.set({ settings: original });
-      expect(readBack.whitelist.includes(TEST_HOST)).toBeTruthy();
+      try {
+        const withHost = { ...original, whitelist: [...(original.whitelist || []), TEST_HOST] };
+        await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: withHost });
+        const readBack = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
+        expect(readBack.whitelist.includes(TEST_HOST)).toBeTruthy();
+      } finally {
+        await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
+      }
     });
   });
 
@@ -277,6 +305,177 @@
     it('includes youtube.com entry', async () => {
       const reply = await chrome.runtime.sendMessage({ type: 'GET_SITE_KILLERS' });
       expect(Array.isArray(reply.killers['youtube.com'])).toBeTruthy();
+    });
+  });
+
+  describe('UPDATE_SETTINGS validation (1.1.2 A4)', () => {
+    it('non-array whitelist coerces to empty array', async () => {
+      const original = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
+      await chrome.runtime.sendMessage({
+        type: 'UPDATE_SETTINGS',
+        settings: { ...original, whitelist: 'not-an-array' }
+      });
+      const readBack = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
+      expect(Array.isArray(readBack.whitelist)).toBeTruthy();
+      await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
+    });
+    it('non-boolean toggle rejected, default preserved', async () => {
+      const original = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
+      await chrome.runtime.sendMessage({
+        type: 'UPDATE_SETTINGS',
+        settings: { ...original, blockingEnabled: 'yes please' }
+      });
+      const readBack = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
+      expect(typeof readBack.blockingEnabled).toBe('boolean');
+      await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
+    });
+    it('out-of-range idleThresholdMinutes falls back to default', async () => {
+      const original = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
+      await chrome.runtime.sendMessage({
+        type: 'UPDATE_SETTINGS',
+        settings: { ...original, idleThresholdMinutes: 999 }
+      });
+      const readBack = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
+      // 999 is not in ALLOWED_THRESHOLDS so the default (5) must be used.
+      expect(readBack.idleThresholdMinutes).toBe(5);
+      await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
+    });
+  });
+
+  describe('GET_CONTENT_SETTINGS (1.1.2 A1)', () => {
+    // RFC 2606 reserves .example for testing; pttf-test.example passes
+    // isValidInitiatorDomain so UPDATE_SETTINGS won't filter it out.
+    const TEST_HOST = 'pttf-test.example';
+
+    it('returns a detail with boolean feature flags + siteKillers array', async () => {
+      const reply = await chrome.runtime.sendMessage({
+        type: 'GET_CONTENT_SETTINGS', host: 'youtube.com'
+      });
+      expect(reply.ok).toBeTruthy();
+      expect(typeof reply.detail).toBe('object');
+      expect(typeof reply.detail.jsThrottleEnabled).toBe('boolean');
+      expect(Array.isArray(reply.detail.siteKillers)).toBeTruthy();
+    });
+    it('whitelisted host returns siteKillers: [] and all feature flags false', async () => {
+      const original = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
+      const withHost = { ...original, whitelist: [...(original.whitelist || []), TEST_HOST] };
+      await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: withHost });
+      const reply = await chrome.runtime.sendMessage({
+        type: 'GET_CONTENT_SETTINGS', host: TEST_HOST
+      });
+      await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
+      expect(reply.detail.siteKillers.length).toBe(0);
+      expect(reply.detail.jsThrottleEnabled).toBe(false);
+      expect(reply.detail.imageLazyEnabled).toBe(false);
+    });
+  });
+
+  describe('Boost reasons (1.1.2 B5)', () => {
+    const TEST_HOST = 'pttf-test.example';
+    it('BOOST_TAB on a whitelisted host returns reason=whitelisted', async () => {
+      const original = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
+      try {
+        const withHost = { ...original, whitelist: [...(original.whitelist || []), TEST_HOST] };
+        await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: withHost });
+        const reply = await chrome.runtime.sendMessage({
+          type: 'BOOST_TAB', host: TEST_HOST, tabId: 999999
+        });
+        expect(reply.ok).toBe(false);
+        expect(reply.reason).toBe('whitelisted');
+      } finally {
+        await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
+      }
+    });
+  });
+
+  describe('Cloud sync purge (1.1.3 B1)', () => {
+    // Restores the pre-test sync state at the end so the user's real sync data
+    // is not affected by the test. Skips if useCloudSync is currently disabled
+    // (which is the safe default) to avoid touching the user's Google account.
+    it('toggling useCloudSync off clears chrome.storage.sync', async () => {
+      const original = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
+      const syncBefore = await chrome.storage.sync.get(null);
+      try {
+        // Turn sync on, write something, then turn it off and verify it's gone.
+        await chrome.runtime.sendMessage({
+          type: 'UPDATE_SETTINGS',
+          settings: { ...original, useCloudSync: true, syncHostsToCloud: true }
+        });
+        await chrome.runtime.sendMessage({
+          type: 'UPDATE_SETTINGS',
+          settings: { ...original, useCloudSync: false }
+        });
+        const syncAfter = await chrome.storage.sync.get(null);
+        expect(Object.keys(syncAfter).length).toBe(0);
+      } finally {
+        await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
+        // Restore prior sync state (if any).
+        if (Object.keys(syncBefore).length > 0) {
+          try { await chrome.storage.sync.set(syncBefore); } catch (e) {}
+        }
+      }
+    });
+    it('toggling syncHostsToCloud off strips host fields from sync', async () => {
+      const original = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
+      const syncBefore = await chrome.storage.sync.get(null);
+      try {
+        const TEST_HOST = 'pttf-sync-test.example';
+        await chrome.runtime.sendMessage({
+          type: 'UPDATE_SETTINGS',
+          settings: { ...original, useCloudSync: true, syncHostsToCloud: true,
+                      whitelist: [...(original.whitelist || []), TEST_HOST] }
+        });
+        await chrome.runtime.sendMessage({
+          type: 'UPDATE_SETTINGS',
+          settings: { ...original, useCloudSync: true, syncHostsToCloud: false,
+                      whitelist: [...(original.whitelist || []), TEST_HOST] }
+        });
+        const syncAfter = await chrome.storage.sync.get('settings');
+        const haveWl = syncAfter.settings && Array.isArray(syncAfter.settings.whitelist);
+        expect(!haveWl).toBeTruthy();
+      } finally {
+        await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
+        try { await chrome.storage.sync.clear(); } catch (e) {}
+        if (Object.keys(syncBefore).length > 0) {
+          try { await chrome.storage.sync.set(syncBefore); } catch (e) {}
+        }
+      }
+    });
+  });
+
+  describe('GET_CONTENT_SETTINGS host coverage (1.1.3 A2)', () => {
+    it('popup-context callers (sender.tab undefined) still respect msg.host', async () => {
+      // tests.js runs in popup context where sender.tab is undefined, so the
+      // A2 fallback (use msg.host) applies. Content-script callers cannot reach
+      // this path — that branch is verified by the manual page-script probe.
+      const reply = await chrome.runtime.sendMessage({
+        type: 'GET_CONTENT_SETTINGS', host: 'youtube.com'
+      });
+      expect(reply.ok).toBeTruthy();
+      expect(typeof reply.detail).toBe('object');
+    });
+  });
+
+  describe('PRIVILEGED handlers from popup pass through (1.1.3 A1)', () => {
+    // All four newly-privileged read handlers must continue to work for the
+    // popup, which is the only legitimate caller. Failure here means the
+    // PRIVILEGED check is rejecting popup messages (sender.tab should be
+    // undefined for extension pages).
+    it('GET_SETTINGS still responds from popup', async () => {
+      const r = await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' });
+      expect(!!(r && r.settings)).toBeTruthy();
+    });
+    it('GET_STATS still responds from popup', async () => {
+      const r = await chrome.runtime.sendMessage({ type: 'GET_STATS' });
+      expect(!!(r && r.stats)).toBeTruthy();
+    });
+    it('GET_BOOST_STATUS still responds from popup', async () => {
+      const r = await chrome.runtime.sendMessage({ type: 'GET_BOOST_STATUS', tabId: -1 });
+      expect(r && r.boosted === false).toBeTruthy();
+    });
+    it('GET_SITE_KILLERS still responds from popup', async () => {
+      const r = await chrome.runtime.sendMessage({ type: 'GET_SITE_KILLERS' });
+      expect(r && r.ok === true).toBeTruthy();
     });
   });
 
@@ -299,5 +498,7 @@
     return { passed, failed: results.length - passed, total: results.length, results };
   }
 
-  window.runTests = runTests;
+  // E7: namespaced so the public window.runTests name no longer carries
+  // dev-only test code. popup.js reads window.__potatofyTests.run().
+  globalThis.__potatofyTests = { run: runTests };
 })();

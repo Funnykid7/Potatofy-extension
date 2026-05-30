@@ -25,10 +25,14 @@ build/
 *.pem
 *.zip
 
-# Chromium internals
+# Chrome auto-generated metadata (build/indexing output)
 _metadata/
 
 # Performance traces (large session dumps; not source)
 with*.json
 without*.json
 *.trace.json
+
+# Claude Code session data and audit files
+.claude/
+flaws*.md

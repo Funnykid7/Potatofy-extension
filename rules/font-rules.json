@@ -1,6 +1,6 @@
 [
   {
-    "id": 1,
+    "id": 100,
     "priority": 1,
     "action": { "type": "block" },
     "condition": {
@@ -17,11 +17,18 @@
         "fonts.net",
         "webfont.fontspring.com",
         "f.fontdeck.com",
-        "use.edgefonts.net",
-        "cdn.jsdelivr.net",
-        "cdnjs.cloudflare.com"
+        "use.edgefonts.net"
       ],
       "resourceTypes": ["font", "stylesheet"]
+    }
+  },
+  {
+    "id": 101,
+    "priority": 1,
+    "action": { "type": "block" },
+    "condition": {
+      "requestDomains": ["cdn.jsdelivr.net", "cdnjs.cloudflare.com"],
+      "resourceTypes": ["font"]
     }
   }
 ]
