@@ -1394,13 +1394,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'HEAP_MEASUREMENT') {
     (async () => {
       try {
+        // Validate input: feature name must be whitelisted, freed must be a valid number
+        const VALID_FEATURES = new Set([
+          'animationsKilled', 'videosPaused', 'videosPreloadNoned',
+          'autoplayKilled', 'imagesLazied', 'siteKillerHits'
+        ]);
+        const feature = msg.feature;
+        const freed = msg.freed;
+
+        // Reject if feature is not whitelisted or freed is not a valid positive number
+        if (!VALID_FEATURES.has(feature) || !Number.isFinite(freed) || freed < 0) {
+          return;
+        }
+
         const stored = await chrome.storage.local.get('heapMeasurements');
         const measurements = stored.heapMeasurements || {};
 
-        const feature = msg.feature;
         measurements[feature] = measurements[feature] || [];
         measurements[feature].push({
-          freed: msg.freed,
+          freed: freed,
           timestamp: Date.now()
         });
 

@@ -878,12 +878,14 @@
   function measureHeapDelta(featureName) {
     if (!performance.memory) return; // Chrome only, non-standard API
 
-    // Schedule measurement asynchronously to avoid blocking user interaction
+    // Schedule measurement asynchronously to avoid blocking user interaction.
+    // Note: GC timing is unpredictable; 200ms provides reasonable confidence but
+    // measurements represent conservative lower bounds, not exact freed memory.
     setTimeout(() => {
       try {
         const heapBefore = performance.memory.usedJSHeapSize;
 
-        // Wait for GC to complete before measuring
+        // Wait for GC to complete (200ms accommodates most typical heap sizes)
         setTimeout(() => {
           try {
             const heapAfter = performance.memory.usedJSHeapSize;
@@ -899,7 +901,7 @@
           } catch (e) {
             // Silent fail
           }
-        }, 50);
+        }, 200);
       } catch (e) {
         // Silent fail - measurement not available
       }
