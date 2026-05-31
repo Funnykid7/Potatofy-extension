@@ -107,7 +107,7 @@ The content script runs in `"world": "MAIN"` because it must override `window.se
 ./build.sh
 ```
 
-Produces `potatofy-v1.1.4.zip`, excluding `docs/`, `README.md`, `LICENSE`, development scripts, and the diagnostics test suite. See `STORE_LISTING.md` for the store description and permissions justification copy.
+Produces `potatofy-v1.1.4.zip`, excluding `docs/`, `README.md`, `LICENSE`, development scripts, and the diagnostics test suite.
 
 ---
 

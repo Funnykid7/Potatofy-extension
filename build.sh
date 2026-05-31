@@ -28,6 +28,7 @@ rm -f "${ZIP}"
 # ZIP excludes tests.js, so the tag would produce a broken resource reference
 # that CWS review automation flags as a policy violation.
 cp popup/popup.html popup/popup.html.orig
+trap 'mv popup/popup.html.orig popup/popup.html 2>/dev/null; true' EXIT
 python3 -c "
 with open('popup/popup.html') as f:
     lines = f.readlines()

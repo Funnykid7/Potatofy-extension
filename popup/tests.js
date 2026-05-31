@@ -198,6 +198,15 @@
       const { weights } = await chrome.runtime.sendMessage({ type: 'GET_STATS' });
       expect(weights.tabDiscard.ramBytes < 200 * 1024 * 1024).toBeTruthy();
     });
+
+    it('breakdown parts sum to totalRamBytes', async () => {
+      const { savings } = await chrome.runtime.sendMessage({ type: 'GET_STATS' });
+      const s = savings.session;
+      const sum = (s.breakdown?.real?.ramBytes ?? 0) +
+                  (s.breakdown?.measured?.ramBytes ?? 0) +
+                  (s.breakdown?.estimated?.ramBytes ?? 0);
+      expect(sum).toBe(s.ramBytes);
+    });
   });
 
   describe('STATS_INCREMENT — round-trip', () => {

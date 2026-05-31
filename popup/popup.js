@@ -5,7 +5,7 @@ import { DEFAULT_SETTINGS, ALLOWED_THRESHOLDS, ALLOWED_PRESSURE_MB } from '../li
 const IS_PACKAGED = !!chrome.runtime.getManifest().update_url;
 
 // E3: shared formatters loaded by ../lib/formatters.js classic script.
-const { formatBytes, formatMs } = window.PotatofyFmt;
+const { formatBytes, formatMs, normalizeHost } = window.PotatofyFmt;
 
 // 1.1.2 A3 — used by the whitelist cap warning.
 const MAX_WHITELIST = 199;
@@ -54,10 +54,6 @@ const els = {
 let currentSettings = { ...DEFAULT_SETTINGS };
 let currentHostname = null;
 
-function normalizeHost(h) {
-  return (h || '').replace(/^www\./, '').toLowerCase();
-}
-
 let currentTabId = null;
 
 async function getActiveTab() {
@@ -89,6 +85,7 @@ async function loadSettings() {
 }
 
 let toastTimer = null;
+let toastFadeTimer = null;
 function showToast(msg) {
   // Reuse any existing toast element to avoid stacking.
   let el = document.querySelector('.toast');
@@ -100,9 +97,10 @@ function showToast(msg) {
   el.classList.remove('fade-out');
   el.textContent = msg;
   if (toastTimer) clearTimeout(toastTimer);
+  if (toastFadeTimer) clearTimeout(toastFadeTimer);
   toastTimer = setTimeout(() => {
     el.classList.add('fade-out');
-    setTimeout(() => el.remove(), 200);
+    toastFadeTimer = setTimeout(() => { el.remove(); toastFadeTimer = null; }, 200);
     toastTimer = null;
   }, 3000);
 }
@@ -144,7 +142,11 @@ function renderToggles() {
 // NIT-2 — single place that sets the boost button's default label so neither
 // refreshBoostState nor the click-handler's restore timeout can drift out of sync.
 function setBoostBtnDefault() {
-  els.boostBtn.innerHTML = 'Boost <em>this tab</em>'; // static literal, no user data
+  els.boostBtn.replaceChildren();
+  els.boostBtn.append('Boost ');
+  const em = document.createElement('em');
+  em.textContent = 'this tab';
+  els.boostBtn.appendChild(em);
 }
 
 // D: queries SW for the current tab's boost status and renders an active
@@ -341,7 +343,7 @@ async function refreshStats() {
 
     // Build RAM display with breakdown details
     let ramDisplay = ramPrefix + formatBytes(ramDisplayed);
-    if (hasMeasuredData && savings.breakdown) {
+    if (hasMeasuredData && savings.breakdown && !isCapped) {
       const parts = [];
       if (hasRealMeasurement && savings.breakdown?.real?.ramBytes) {
         parts.push(`${formatBytes(savings.breakdown.real.ramBytes)} (measured)`);
@@ -530,7 +532,7 @@ function bindStatsControls() {
 
 function bindStorageListener() {
   chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName === 'local' && (changes.stats || changes.heapMeasurements)) {
+    if (areaName === 'local' && (changes.stats || changes.heapMeasurements || changes.calibratedBandwidth)) {
       refreshStats();
     }
     if (areaName === 'local' && changes.settings) {
@@ -656,6 +658,7 @@ privacyAcceptBtn.addEventListener('click', async () => {
   try {
     await chrome.storage.local.set({ privacyAccepted: true });
     hidePrivacyModal();
+    await initPopup();
   } catch (e) {
     console.error('[Potatofy] Could not save privacy acceptance:', e);
   }
@@ -667,14 +670,10 @@ privacyModal.addEventListener('keydown', (e) => {
   }
 });
 
-document.addEventListener('DOMContentLoaded', async () => {
-  // Check privacy policy acceptance first
-  const accepted = await checkPrivacyAcceptance();
-  if (!accepted) {
-    showPrivacyModal();
-    return;
-  }
-
+let _initDone = false;
+async function initPopup() {
+  if (_initDone) return;
+  _initDone = true;
   currentHostname = await getActiveHostname();
   els.hostname.textContent = currentHostname || 'unavailable';
   await loadSettings();
@@ -696,4 +695,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   refreshStats();
   await refreshBoostState();
+}
+
+document.addEventListener('DOMContentLoaded', async () => {
+  // Check privacy policy acceptance first
+  const accepted = await checkPrivacyAcceptance();
+  if (!accepted) {
+    showPrivacyModal();
+    return;
+  }
+  await initPopup();
 });

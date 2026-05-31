@@ -8,71 +8,11 @@
   <meta name="description" content="Potatofy privacy policy. No analytics, no telemetry, no data collection by default." />
   <link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
   <link rel="alternate icon" href="assets/icon48.png" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; img-src 'self' data:; script-src 'self'" />
+  <meta http-equiv="X-Content-Type-Options" content="nosniff" />
   <link rel="stylesheet" href="styles.css" />
-  <style>
-    .prose {
-      max-width: 720px;
-      margin: 0 auto;
-      padding: clamp(48px, 7vw, 96px) clamp(20px, 4vw, 48px);
-    }
-    .prose h1 {
-      font-size: clamp(2rem, 4vw, 3rem);
-      font-weight: 700;
-      letter-spacing: -0.03em;
-      line-height: 1.08;
-      margin: 0 0 8px;
-    }
-    .prose .updated {
-      font-family: var(--font-mono);
-      font-size: 12px;
-      letter-spacing: 0.08em;
-      color: var(--text-dim);
-      margin: 0 0 var(--space-5);
-    }
-    .prose h2 {
-      font-size: 1.25rem;
-      font-weight: 600;
-      letter-spacing: -0.015em;
-      margin: var(--space-5) 0 12px;
-      color: var(--text);
-    }
-    .prose p, .prose li {
-      font-size: 1rem;
-      color: var(--text-mute);
-      line-height: 1.65;
-      margin: 0 0 14px;
-    }
-    .prose ul {
-      padding-left: 22px;
-      margin: 0 0 14px;
-    }
-    .prose li { margin: 0 0 6px; }
-    .prose code {
-      font-family: var(--font-mono);
-      font-size: 0.88em;
-      background: var(--surface-3);
-      border: 1px solid var(--border-strong);
-      padding: 1px 5px;
-      border-radius: 4px;
-      color: var(--text);
-    }
-    .prose a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
-    .prose a:hover { color: #5cb860; }
-    .prose .callout {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-left: 3px solid var(--accent);
-      border-radius: var(--radius);
-      padding: 16px 20px;
-      margin: 0 0 var(--space-3);
-    }
-    .prose .callout p { margin: 0; color: var(--text); }
-    .prose hr {
-      border: none;
-      border-top: 1px solid var(--border);
-      margin: var(--space-5) 0;
-    }
-  </style>
+  <link rel="stylesheet" href="privacy.css" />
+  <script src="script.js" defer></script>
 </head>
 <body>
 
@@ -109,12 +49,19 @@
     <p><strong>Nothing, by default.</strong> The extension operates entirely on your device. It reads your browser's tab state, memory usage, and the URLs of pages you visit — but only locally, to decide which optimisations to apply. None of this is stored beyond the current session or transmitted anywhere.</p>
 
     <h2>Local storage only</h2>
-    <p>Potatofy stores two things in <code>chrome.storage.local</code> on your device:</p>
+    <p>Potatofy stores six things in <code>chrome.storage.local</code> on your device:</p>
     <ul>
-      <li><strong>Settings</strong> — your feature toggle states and numeric thresholds (e.g. idle timeout, memory pressure level). No browsing history, no URLs, no page content.</li>
-      <li><strong>Stats counters</strong> — estimated counts of blocked requests, discarded tabs, and similar aggregate numbers used to show you the popup's savings display. These are heuristic estimates, not a log of your activity.</li>
+      <li><strong><code>settings</code></strong> — your feature toggle states and numeric thresholds (e.g. idle timeout, memory pressure level). No browsing history, no URLs, no page content.</li>
+      <li><strong><code>stats</code></strong> — estimated counts of blocked requests, discarded tabs, and similar aggregate numbers used to show you the popup's savings display. These are heuristic estimates, not a log of your activity.</li>
+      <li><strong><code>calibrationHistory</code></strong> — a rolling window (up to 100 entries) of median resource sizes observed by the PerformanceObserver on pages you visit, used to calibrate bandwidth-saved estimates. Contains byte sizes only — no URLs, no page content.</li>
+      <li><strong><code>calibratedBandwidth</code></strong> — the current aggregate median derived from <code>calibrationHistory</code>, used as a per-category bandwidth weight in the savings display.</li>
+      <li><strong><code>heapMeasurements</code></strong> — per-feature arrays of JS heap delta measurements (bytes freed) used to replace heuristic RAM estimates with real measured values. Contains byte counts and measurement timestamps (millisecond epoch integers) — no URLs, no page content, no personal data.</li>
+      <li><strong><code>privacyAccepted</code></strong> — a single boolean recording that you have accepted this privacy policy. Required before the popup activates.</li>
     </ul>
     <p>This data never leaves your device unless you opt into sync (see below).</p>
+
+    <h2>Session storage (clears on browser close)</h2>
+    <p>Potatofy also uses <code>chrome.storage.session</code> for temporary operational state that is automatically erased when the browser closes. This includes: tab activity timestamps (used to determine idle time), active boost rules (host name and rule IDs for the current tab), in-progress stats counters (to survive service worker restarts within a session), accordion open/close state (UI preference), and the device's RAM capacity (cached to avoid repeated API calls). None of this data persists across browser restarts.</p>
 
     <h2>Optional cloud sync (opt-in, off by default)</h2>
     <p>If you enable <em>Sync settings to Google</em> in the popup, Potatofy mirrors your feature toggle settings to <code>chrome.storage.sync</code>. This uses Chrome's built-in sync infrastructure, which routes through Google's servers under Google's privacy policy. Potatofy does not operate any server; we have no access to this data.</p>

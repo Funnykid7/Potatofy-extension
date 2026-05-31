@@ -4,6 +4,7 @@
   const _requestAnimationFrame = (window.requestAnimationFrame || function () { return 0; }).bind(window);
   const _cancelAnimationFrame = (window.cancelAnimationFrame || function () {}).bind(window);
   const _requestIdleCallback = (window.requestIdleCallback || function (cb) { return _setTimeout(cb, 1); }).bind(window);
+  const _setInterval = window.setInterval.bind(window);
 
   // 1.1.1: only the top frame reports stats. Content scripts run per-frame
   // (`all_frames: true`), so a page with N same-origin iframes would otherwise
@@ -291,11 +292,12 @@
   }
 
   function pauseAllVideos(root) {
-    if (!root || !root.querySelectorAll) return;
+    if (!root || !root.querySelectorAll) return false;
     let count = 0;
     const nodes = root.querySelectorAll('video');
     for (const n of nodes) if (pauseVideoNode(n)) count++;
     if (count) reportStat('videosPaused', count);
+    return count > 0;
   }
 
   function restoreVideoPlayability(root) {
@@ -331,7 +333,7 @@
   }
 
   function applyVideoPreloadNoneAll(root) {
-    if (!root || !root.querySelectorAll) return;
+    if (!root || !root.querySelectorAll) return false;
     let count = 0;
     const nodes = root.querySelectorAll('video');
     for (const n of nodes) if (applyVideoPreloadNone(n)) count++;
@@ -339,6 +341,7 @@
     // correct toggle. Previously folded into videosPaused which misled users
     // about which feature was contributing.
     if (count) reportStat('videosPreloadNoned', count);
+    return count > 0;
   }
 
   // ---------- Animation killer ----------
@@ -367,7 +370,7 @@
   }
 
   function applyAnimationKill() {
-    if (killStyleEl) return;
+    if (killStyleEl) return false;
     const css = `
       *,
       *::before,
@@ -404,6 +407,7 @@
     };
     if (document.head || document.documentElement) insert();
     else document.addEventListener('DOMContentLoaded', insert, { once: true });
+    return true;
   }
 
   function removeAnimationKill() {
@@ -418,7 +422,7 @@
   let siteKillerStyleEl = null;
 
   function applySiteKillers() {
-    if (siteKillerStyleEl || !settings.siteKillersEnabled || settings.siteKillers.length === 0) return;
+    if (siteKillerStyleEl || !settings.siteKillersEnabled || settings.siteKillers.length === 0) return false;
     // 1.1.2 (B6): validate each selector in isolation so one bad pattern can't
     // poison the entire stylesheet. querySelector throws on syntax errors but
     // is fast and uses the real CSS engine.
@@ -442,7 +446,7 @@
       if (BLOCKED_LEADING_RE.test(t)) return false;
       try { document.querySelector(s); return true; } catch (e) { return false; }
     });
-    if (selectors.length === 0) return;
+    if (selectors.length === 0) return false;
     const css = selectors.join(',\n') + ' { display: none !important; }';
     const insert = () => {
       if (siteKillerStyleEl) return;
@@ -454,6 +458,7 @@
     };
     if (document.head || document.documentElement) insert();
     else document.addEventListener('DOMContentLoaded', insert, { once: true });
+    return true;
   }
 
   function removeSiteKillers() {
@@ -497,7 +502,7 @@
   }
 
   function applyImageLazyAll(root) {
-    if (!root || !root.querySelectorAll) return;
+    if (!root || !root.querySelectorAll) return false;
     let count = 0;
     const nodes = root.querySelectorAll('img, iframe');
     for (const n of nodes) {
@@ -505,6 +510,7 @@
       if (lazifyImage(n)) count++;
     }
     if (count) reportStat('imagesLazied', count);
+    return count > 0;
   }
 
   function restoreImageQuality() {
@@ -571,11 +577,12 @@
   }
 
   function killAutoplayAll(root) {
-    if (!root || !root.querySelectorAll) return;
+    if (!root || !root.querySelectorAll) return false;
     let count = 0;
     const nodes = root.querySelectorAll('video, audio');
     for (const n of nodes) if (killAutoplay(n)) count++;
     if (count) reportStat('autoplayKilled', count);
+    return count > 0;
   }
 
   // ---------- Mutation observer (P1: narrowed, idle-deferred, auto-disconnect) ----------
@@ -705,13 +712,11 @@
 
     if (settings.animationKillEnabled) {
       const _hb = performance.memory ? performance.memory.usedJSHeapSize : 0;
-      applyAnimationKill();
-      measureHeapDelta('animationsKilled', _hb);
+      if (applyAnimationKill()) measureHeapDelta('animationsKilled', _hb);
     } else removeAnimationKill();
     if (settings.siteKillersEnabled && settings.siteKillers.length > 0) {
       const _hb = performance.memory ? performance.memory.usedJSHeapSize : 0;
-      applySiteKillers();
-      measureHeapDelta('siteKillerHits', _hb);
+      if (applySiteKillers()) measureHeapDelta('siteKillerHits', _hb);
     } else removeSiteKillers();
 
     // L-3 — only walk the document when an image-modifying feature is actually
@@ -719,25 +724,21 @@
     // avoid the apply-then-immediately-restore churn that ran every applyAll.
     if (settings.imageLazyEnabled || settings.imageLowQualityEnabled) {
       const _hb = performance.memory ? performance.memory.usedJSHeapSize : 0;
-      applyImageLazyAll(document);
-      measureHeapDelta('imagesLazied', _hb);
+      if (applyImageLazyAll(document)) measureHeapDelta('imagesLazied', _hb);
     }
     if (!settings.imageLowQualityEnabled) restoreImageQuality();
     if (settings.prefetchStripEnabled) applyPrefetchStripAll(document);
     if (settings.autoplayKillEnabled) {
       const _hb = performance.memory ? performance.memory.usedJSHeapSize : 0;
-      killAutoplayAll(document);
-      measureHeapDelta('autoplayKilled', _hb);
+      if (killAutoplayAll(document)) measureHeapDelta('autoplayKilled', _hb);
     }
     if (settings.videoPreloadNoneEnabled) {
       const _hb = performance.memory ? performance.memory.usedJSHeapSize : 0;
-      applyVideoPreloadNoneAll(document);
-      measureHeapDelta('videosPreloadNoned', _hb);
+      if (applyVideoPreloadNoneAll(document)) measureHeapDelta('videosPreloadNoned', _hb);
     }
     if (settings.videoPauseEnabled && isHidden()) {
       const _hb = performance.memory ? performance.memory.usedJSHeapSize : 0;
-      pauseAllVideos(document);
-      measureHeapDelta('videosPaused', _hb);
+      if (pauseAllVideos(document)) measureHeapDelta('videosPaused', _hb);
     }
 
     if (anyContentFeatureEnabled()) startObserver(); else stopObserver();
@@ -792,7 +793,6 @@
 
   const resourceStats = {
     trackers: [],
-    ads: [],
     fonts: [],
     scripts: [],
     images: []
@@ -811,8 +811,6 @@
 
           if (/google-analytics|facebook\.com|segment\.com|mixpanel|amplitude|hotjar|intercom|drift/.test(url)) {
             if (resourceStats.trackers.length < 500) resourceStats.trackers.push(size);
-          } else if (/ads\.google|adswyzz|doubleclick|criteo|casalemedia|adform|appnexus|openx|rubiconproject|sonobi/.test(url)) {
-            if (resourceStats.ads.length < 500) resourceStats.ads.push(size);
           } else if (/\.woff2?|\.ttf|\.otf|fonts\.googleapis|fonts\.gstatic/.test(url)) {
             if (resourceStats.fonts.length < 500) resourceStats.fonts.push(size);
           } else if (/\.js$/.test(url)) {
@@ -835,18 +833,9 @@
 
     const calibration = {
       trackers: median(resourceStats.trackers),
-      ads: median(resourceStats.ads),
       fonts: median(resourceStats.fonts),
       scripts: median(resourceStats.scripts),
       images: median(resourceStats.images),
-      timestamp: Date.now(),
-      counts: {
-        trackers: resourceStats.trackers.length,
-        ads: resourceStats.ads.length,
-        fonts: resourceStats.fonts.length,
-        scripts: resourceStats.scripts.length,
-        images: resourceStats.images.length
-      }
     };
 
     chrome.runtime.sendMessage({
@@ -854,12 +843,11 @@
       data: calibration
     }).catch(() => {}); // Silent fail
 
-    // Reset for next batch
-    resourceStats.trackers = [];
-    resourceStats.ads = [];
-    resourceStats.fonts = [];
-    resourceStats.scripts = [];
-    resourceStats.images = [];
+    // Reset for next batch — only clear arrays that contributed to this send
+    if (resourceStats.trackers.length > 0) resourceStats.trackers = [];
+    if (resourceStats.fonts.length > 0)    resourceStats.fonts = [];
+    if (resourceStats.scripts.length > 0)  resourceStats.scripts = [];
+    if (resourceStats.images.length > 0)   resourceStats.images = [];
   }
 
   // Median helper (local copy for IIFE context; lib version used by service-worker.js)
@@ -880,7 +868,7 @@
       initResourceObserver();
     }
 
-    setInterval(sendCalibrationData, 30000); // Send every 30 seconds
+    _setInterval(sendCalibrationData, 30000); // Send every 30 seconds
   }
 
   // ========== Phase 3: Heap Memory Measurement ==========
@@ -899,6 +887,7 @@
   // heapBefore must be captured synchronously before the feature runs; this
   // function then waits 200ms for GC before taking the after-snapshot.
   // IS_TOP_FRAME guard deduplicates across same-origin iframes (all_frames: true).
+  // Chrome-only non-standard API; guarded below — no-ops on other browsers.
   function measureHeapDelta(featureName, heapBefore) {
     if (!performance.memory || !IS_TOP_FRAME || !heapBefore) return;
 

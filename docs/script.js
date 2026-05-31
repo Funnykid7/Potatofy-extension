@@ -2,6 +2,8 @@
    Three small jobs: copy-clone-command, scroll-reveal, smooth in-page nav. */
 
 (() => {
+  if (window.top !== window.self) { window.top.location = window.self.location; }
+
   const prefersReduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   // -------- Copy clone command --------
@@ -14,14 +16,7 @@
       try {
         await navigator.clipboard.writeText(text);
       } catch {
-        // Fallback for browsers without clipboard API (file:// in some setups)
-        const r = document.createRange();
-        r.selectNodeContents(cloneCmd);
-        const sel = window.getSelection();
-        sel.removeAllRanges();
-        sel.addRange(r);
-        try { document.execCommand("copy"); } catch (_) {}
-        sel.removeAllRanges();
+        // execCommand('copy') is deprecated; clipboard API unavailable in this context — silent no-op.
       }
       const old = copyBtn.textContent;
       copyBtn.textContent = "Copied";

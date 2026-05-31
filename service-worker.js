@@ -38,7 +38,7 @@ const BOOLEAN_SETTING_KEYS = [
   'autoplayKillEnabled', 'prefetchStripEnabled', 'videoPauseEnabled',
   'videoPreloadNoneEnabled', 'thirdPartyScriptBlockEnabled',
   'foregroundPotatoEnabled', 'siteKillersEnabled', 'memoryPressureEnabled',
-  'useCloudSync', 'syncHostsToCloud', 'privacyAccepted'
+  'useCloudSync', 'syncHostsToCloud'
 ];
 
 const PRIVILEGED_MESSAGE_TYPES = new Set([
@@ -97,6 +97,7 @@ async function getSiteKillers() {
   return siteKillerCache;
 }
 
+// SW-local copy — service workers cannot import ES modules, so lib/formatters.js cannot be shared here.
 function normalizeHost(h) {
   return (h || '').replace(/^www\./, '').toLowerCase();
 }
@@ -446,7 +447,7 @@ const VALID_HEAP_FEATURES = new Set([
 // expected shape before writing to storage.
 function isValidCalibrationData(d) {
   if (!d || typeof d !== 'object' || Array.isArray(d)) return false;
-  for (const k of ['trackers', 'ads', 'fonts', 'scripts', 'images']) {
+  for (const k of ['trackers', 'fonts', 'scripts', 'images']) {
     if (!Number.isFinite(d[k]) || d[k] < 0 || d[k] > MAX_CALIBRATION_BYTES) return false;
   }
   return true;
@@ -519,7 +520,8 @@ function updateBadge() {
         (stats.session.blockedRequests || 0) +
         (stats.session.blockedFonts || 0) +
         (stats.session.tabsDiscarded || 0) +
-        (stats.session.thirdPartyScriptsBlocked || 0);
+        (stats.session.thirdPartyScriptsBlocked || 0) +
+        (stats.session.thirdPartyImagesBlocked || 0);
       await chrome.action.setBadgeBackgroundColor({ color: '#4caf50' });
       await chrome.action.setBadgeText({ text: total > 0 ? abbreviateCount(total) : '' });
     } catch (e) {}
@@ -981,7 +983,7 @@ async function discardEligibleTabs({ minIdleMs = 0 } = {}) {
     if (realFreedBytes > 0) {
       increment.realRamFreed = realFreedBytes;
     }
-    bufferIncrement(increment);
+    await bufferIncrement(increment);
   }
   return discarded;
 }
@@ -1158,9 +1160,6 @@ async function bootstrap(isStartup) {
     await syncPotatoSites();
   });
   await getDeviceCapacityMB();
-  await rehydrateTabLastActive();
-  await rehydrateStatsHot();
-  await rehydrateBoostedTabs();
   await setupAlarms();
   if (isStartup) {
     const stats = await getStats();
@@ -1171,7 +1170,10 @@ async function bootstrap(isStartup) {
 }
 
 // Every SW wake re-runs this top-level. Kick off rehydration eagerly so
-// alarm handlers awaiting _wakeReady get fresh in-memory state.
+// alarm handlers awaiting _wakeReady get fresh in-memory state. bootstrap()
+// awaits _wakeReady before proceeding, so rehydration is guaranteed to have
+// run before any of bootstrap's own code executes — no need to call the
+// rehydrate* functions again inside bootstrap.
 const _wakeReady = (async () => {
   await rehydrateTabLastActive();
   await rehydrateStatsHot();
@@ -1408,7 +1410,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
         history.push({
           trackers: msg.data.trackers,
-          ads:      msg.data.ads,
           fonts:    msg.data.fonts,
           scripts:  msg.data.scripts,
           images:   msg.data.images,
@@ -1417,7 +1418,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
         const aggregated = {
           trackers: median(history.map(h => h.trackers).filter(x => x > 0)),
-          ads: median(history.map(h => h.ads).filter(x => x > 0)),
           fonts: median(history.map(h => h.fonts).filter(x => x > 0)),
           scripts: median(history.map(h => h.scripts).filter(x => x > 0)),
           images: median(history.map(h => h.images).filter(x => x > 0)),
