@@ -347,7 +347,10 @@ async function rehydrateTabLastActive() {
     const s = await chrome.storage.session.get('tabLastActive');
     const obj = s.tabLastActive || {};
     tabLastActive.clear();
-    for (const [k, v] of Object.entries(obj)) tabLastActive.set(Number(k), v);
+    for (const [k, v] of Object.entries(obj)) {
+      const tabId = Number(k);
+      if (!isNaN(tabId)) tabLastActive.set(tabId, v);
+    }
   } catch (e) {}
 }
 
@@ -378,7 +381,10 @@ async function rehydrateStatsHot() {
     const s = await chrome.storage.session.get('statsHot');
     if (s.statsHot) {
       for (const k of Object.keys(s.statsHot)) {
-        if (k in EMPTY_COUNTERS) statsHot[k] = s.statsHot[k];
+        if (k in EMPTY_COUNTERS) {
+          const v = s.statsHot[k];
+          statsHot[k] = Number.isFinite(v) ? v : 0;
+        }
       }
     }
   } catch (e) {}
@@ -789,7 +795,8 @@ async function rehydrateBoostedTabs() {
     boostedTabs.clear();
     for (const [k, v] of Object.entries(obj)) {
       const tabId = Number(k);
-      if (!isNaN(tabId) && v && Array.isArray(v.ruleIds)) {
+      if (!isNaN(tabId) && v && Array.isArray(v.ruleIds) &&
+          typeof v.host === 'string' && isValidInitiatorDomain(v.host)) {
         boostedTabs.set(tabId, v);
         // M-7 — bias boostRuleCounter toward the highest restored slot so the
         // next allocation tends to start beyond live entries. This is a hint,
@@ -1018,7 +1025,6 @@ async function getDeviceCapacityMB() {
 async function checkMemoryPressure() {
   await _wakeReady;
   const settings = await getSettings();
-  if (!settings.tabSuspendEnabled) return;
   if (!settings.memoryPressureEnabled) return;
   if (!chrome.system || !chrome.system.memory) return;
   try {
@@ -1180,8 +1186,12 @@ const _wakeReady = (async () => {
   await rehydrateBoostedTabs();
 })().catch(e => console.error('[Potatofy] wake-rehydrate failed', e));
 
-chrome.runtime.onInstalled.addListener(() => { bootstrap(false); });
-chrome.runtime.onStartup.addListener(() => { bootstrap(true); });
+chrome.runtime.onInstalled.addListener(() => {
+  bootstrap(false).catch(e => console.error('[Potatofy] bootstrap (install) failed:', e));
+});
+chrome.runtime.onStartup.addListener(() => {
+  bootstrap(true).catch(e => console.error('[Potatofy] bootstrap (startup) failed:', e));
+});
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM_IDLE)             checkIdleTabs();
@@ -1406,7 +1416,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       try {
         if (!isValidCalibrationData(msg.data)) return;
         const stored = await chrome.storage.local.get('calibrationHistory');
-        const history = stored.calibrationHistory || [];
+        const history = Array.isArray(stored.calibrationHistory) ? stored.calibrationHistory : [];
 
         history.push({
           trackers: msg.data.trackers,
@@ -1451,7 +1461,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const stored = await chrome.storage.local.get('heapMeasurements');
         const measurements = stored.heapMeasurements || {};
 
-        measurements[feature] = measurements[feature] || [];
+        if (!Array.isArray(measurements[feature])) measurements[feature] = [];
         measurements[feature].push({
           freed: freed,
           timestamp: Date.now()

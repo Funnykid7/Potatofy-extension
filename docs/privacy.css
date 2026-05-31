@@ -60,3 +60,9 @@
   border-top: 1px solid var(--border);
   margin: var(--space-5) 0;
 }
+.prose-footnote {
+  font-size: 0.875rem;
+  color: var(--text-mute);
+  line-height: 1.65;
+  margin: 0 0 14px;
+}

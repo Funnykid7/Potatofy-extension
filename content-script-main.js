@@ -821,7 +821,7 @@
         }
       });
 
-      observer.observe({ entryTypes: ['resource'] });
+      observer.observe({ entryTypes: ['resource'], buffered: true });
     } catch (e) {
       // PerformanceObserver not available or failed
     }

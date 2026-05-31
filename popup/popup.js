@@ -80,8 +80,12 @@ function mergeSettings(src) {
 }
 
 async function loadSettings() {
-  const data = await chrome.storage.local.get('settings');
-  currentSettings = mergeSettings(data.settings);
+  try {
+    const data = await chrome.storage.local.get('settings');
+    currentSettings = mergeSettings(data.settings);
+  } catch (e) {
+    currentSettings = mergeSettings({});
+  }
 }
 
 let toastTimer = null;
@@ -241,10 +245,14 @@ function renderWhitelistList() {
       // the render-time `list`. A settings update (storage.onChanged) can replace
       // currentSettings.whitelist between renders; filtering the stale array would
       // silently drop any entries added since this row was rendered.
-      const cur = currentSettings.whitelist || [];
-      currentSettings.whitelist = cur.filter(h => h !== host);
-      await pushSettings();
-      renderAll();
+      try {
+        const cur = currentSettings.whitelist || [];
+        currentSettings.whitelist = cur.filter(h => h !== host);
+        await pushSettings();
+        renderAll();
+      } catch (e) {
+        showToast('Failed to save — please try again');
+      }
     });
     li.appendChild(span);
     li.appendChild(btn);
@@ -268,9 +276,13 @@ function renderPotatoList() {
     btn.textContent = '×';
     btn.title = `Clear potato mode for ${host}`;
     btn.addEventListener('click', async () => {
-      await chrome.runtime.sendMessage({ type: 'TOGGLE_POTATO_SITE', host, js: false, img: false });
-      await loadSettings();
-      renderAll();
+      try {
+        await chrome.runtime.sendMessage({ type: 'TOGGLE_POTATO_SITE', host, js: false, img: false });
+        await loadSettings();
+        renderAll();
+      } catch (e) {
+        showToast('Failed to save — please try again');
+      }
     });
     li.appendChild(span);
     li.appendChild(btn);
@@ -405,7 +417,11 @@ function bindToggles() {
           els.syncHosts.checked = false;
         }
       }
-      await pushSettings();
+      try {
+        await pushSettings();
+      } catch (e) {
+        showToast('Failed to save — please try again');
+      }
     });
   }
 }
@@ -414,13 +430,21 @@ function bindSuspendControls() {
   els.threshold.addEventListener('change', async () => {
     const v = Number(els.threshold.value);
     currentSettings.idleThresholdMinutes = ALLOWED_THRESHOLDS.includes(v) ? v : 5;
-    await pushSettings();
+    try {
+      await pushSettings();
+    } catch (e) {
+      showToast('Failed to save — please try again');
+    }
   });
 
   els.pressureThresh.addEventListener('change', async () => {
     const v = Number(els.pressureThresh.value);
     currentSettings.memoryPressureThresholdMB = ALLOWED_PRESSURE_MB.includes(v) ? v : 500;
-    await pushSettings();
+    try {
+      await pushSettings();
+    } catch (e) {
+      showToast('Failed to save — please try again');
+    }
   });
 
   els.discardNow.addEventListener('click', async () => {
@@ -462,8 +486,13 @@ function bindSiteActions() {
     // double-click can't re-add a just-removed host (or vice versa).
     // renderWhitelistButton re-enables when renderAll runs.
     els.whitelistBtn.disabled = true;
-    await pushSettings();
-    renderAll();
+    try {
+      await pushSettings();
+      renderAll();
+    } catch (e) {
+      els.whitelistBtn.disabled = false;
+      showToast('Failed to save — please try again');
+    }
   });
 
   els.boostBtn.addEventListener('click', async () => {
@@ -503,21 +532,29 @@ function bindSiteActions() {
   els.killJsBtn.addEventListener('click', async () => {
     if (!currentHostname) return;
     const current = (currentSettings.potatoSites || {})[currentHostname] || { js: false, img: false };
-    await chrome.runtime.sendMessage({
-      type: 'TOGGLE_POTATO_SITE', host: currentHostname, js: !current.js
-    });
-    await loadSettings();
-    renderAll();
+    try {
+      await chrome.runtime.sendMessage({
+        type: 'TOGGLE_POTATO_SITE', host: currentHostname, js: !current.js
+      });
+      await loadSettings();
+      renderAll();
+    } catch (e) {
+      showToast('Failed to save — please try again');
+    }
   });
 
   els.killImgBtn.addEventListener('click', async () => {
     if (!currentHostname) return;
     const current = (currentSettings.potatoSites || {})[currentHostname] || { js: false, img: false };
-    await chrome.runtime.sendMessage({
-      type: 'TOGGLE_POTATO_SITE', host: currentHostname, img: !current.img
-    });
-    await loadSettings();
-    renderAll();
+    try {
+      await chrome.runtime.sendMessage({
+        type: 'TOGGLE_POTATO_SITE', host: currentHostname, img: !current.img
+      });
+      await loadSettings();
+      renderAll();
+    } catch (e) {
+      showToast('Failed to save — please try again');
+    }
   });
 }
 
@@ -525,8 +562,12 @@ function bindStatsControls() {
   els.statsScope.addEventListener('change', refreshStats);
   els.statsReset.addEventListener('click', async () => {
     const scope = els.statsScope.value || 'session';
-    await chrome.runtime.sendMessage({ type: 'RESET_STATS', scope });
-    refreshStats();
+    try {
+      await chrome.runtime.sendMessage({ type: 'RESET_STATS', scope });
+      refreshStats();
+    } catch (e) {
+      showToast('Failed to save — please try again');
+    }
   });
 }
 
@@ -553,9 +594,9 @@ function bindTabActivation() {
     renderWhitelistButton();
     await refreshBoostState();
   };
-  chrome.tabs.onActivated.addListener(refreshSite);
+  chrome.tabs.onActivated.addListener(() => { refreshSite().catch(() => {}); });
   chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-    if (tabId === currentTabId && changeInfo.url) refreshSite();
+    if (tabId === currentTabId && changeInfo.url) refreshSite().catch(() => {});
   });
 }
 
@@ -657,10 +698,18 @@ privacyCheckbox.addEventListener('change', () => {
 privacyAcceptBtn.addEventListener('click', async () => {
   try {
     await chrome.storage.local.set({ privacyAccepted: true });
+  } catch (e) {
+    console.error('[Potatofy] Could not save privacy acceptance:', e);
+    return;
+  }
+  try {
     hidePrivacyModal();
     await initPopup();
   } catch (e) {
-    console.error('[Potatofy] Could not save privacy acceptance:', e);
+    _initDone = false;
+    console.error('[Potatofy] initPopup failed after privacy acceptance:', e);
+    showPrivacyModal();
+    showToast('Something went wrong — please try again');
   }
 });
 

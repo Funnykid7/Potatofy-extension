@@ -8,7 +8,7 @@
   <meta name="description" content="A Chrome extension that reclaims memory, GPU, and bandwidth on Raspberry Pi and low-spec hardware. Block trackers, suspend idle tabs, freeze background JavaScript, kill autoplay, block 3rd-party scripts, and more." />
 
   <meta property="og:title" content="Potatofy - Browsing for the underpowered" />
-  <meta property="og:description" content="Reclaims ~784 MB of RAM on a Raspberry Pi 5. 17 aggressive optimisations, all on by default." />
+  <meta property="og:description" content="Reclaims ~784 MB of RAM on a Raspberry Pi 5. 16 features, 13 on by default." />
   <meta property="og:type" content="website" />
   <meta property="og:image" content="assets/potato.png" />
   <meta name="twitter:card" content="summary_large_image" />
@@ -49,7 +49,7 @@
     <div class="hero-copy">
       <p class="eyebrow">Chromium MV3 extension · v1.1.4</p>
       <h1 class="hero-headline">Browsing for the<br/><em>underpowered.</em></h1>
-      <p class="hero-sub">Potatofy strips out the heavy parts of the modern web so a Raspberry Pi (or any low-spec box) can still browse without melting. 17 features, all on by default, nothing phoning home.</p>
+      <p class="hero-sub">Potatofy strips out the heavy parts of the modern web so a Raspberry Pi (or any low-spec box) can still browse without melting. 16 features, 13 on by default, nothing phoning home.</p>
       <div class="hero-cta">
         <a class="btn btn-primary" href="#install">Install (unpacked)</a>
         <a class="btn btn-ghost" href="https://github.com/Funnykid7/Potatofy-extension" target="_blank" rel="noopener">
@@ -117,8 +117,14 @@
         <div class="popup-section-label popup-section-label--max">Maximum savings</div>
         <div class="popup-toggles">
           <div class="popup-toggle"><span>Block 3rd-party scripts</span><span class="sw on"></span></div>
+          <div class="popup-toggle"><span>Block 3rd-party images</span><span class="sw on"></span></div>
           <div class="popup-toggle"><span>Site-specific killers</span><span class="sw on"></span></div>
           <div class="popup-toggle"><span>Defer video loading</span><span class="sw on"></span></div>
+          <div class="popup-toggle"><span>Low-quality images</span><span class="sw"></span></div>
+        </div>
+        <div class="popup-section-label">Memory pressure</div>
+        <div class="popup-toggles">
+          <div class="popup-toggle"><span>Auto-discard on low RAM</span><span class="sw on"></span></div>
         </div>
       </div>
     </div>
@@ -136,7 +142,7 @@
 <section class="features" id="features">
   <header class="section-head">
     <h2>What it actually does.</h2>
-    <p>Eight standard features and five aggressive maximum-savings features — all on by default. Flip any off, or whitelist a site with one click.</p>
+    <p>Eight standard features and five aggressive maximum-savings features — four on by default (low-quality images is opt-in). Flip any off, or whitelist a site with one click.</p>
   </header>
 
   <p class="features-group-label">Standard — safe defaults</p>
@@ -206,7 +212,7 @@
     </article>
   </div>
 
-  <p class="features-group-label features-group-label--max">Maximum savings — aggressive, default on</p>
+  <p class="features-group-label features-group-label--max">High-impact — can break sites, whitelist to restore</p>
   <div class="bento bento-max">
     <article class="card card-feature card-wide-max">
       <div class="card-icon card-icon--warn" aria-hidden="true">
@@ -338,7 +344,7 @@
     </details>
     <details>
       <summary>What is the "Maximum savings" section?</summary>
-      <p>These are features that deliver the biggest gains but can cause breakage on some sites. All five are on by default: block 3rd-party scripts, block 3rd-party images in the foreground (Foreground Potato Mode), site-specific element killers, defer video loading, and memory pressure auto-discard. If a site stops working, open the popup, hit <em>Whitelist This Site</em>, and all features are suspended for that domain instantly. You can also toggle individual features off globally from the popup.</p>
+      <p>These are features that deliver the biggest gains but can cause breakage on some sites. Four of five are on by default: block 3rd-party scripts, block 3rd-party images in the foreground (Foreground Potato Mode), site-specific element killers, and defer video loading. The fifth — low-quality images — is off by default and opt-in. If a site stops working, open the popup, hit <em>Whitelist This Site</em>, and all features are suspended for that domain instantly. You can also toggle individual features off globally from the popup.</p>
     </details>
     <details>
       <summary>Why Raspberry Pi specifically?</summary>
