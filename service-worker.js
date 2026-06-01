@@ -814,12 +814,12 @@ async function rehydrateBoostedTabs() {
     }
     // GC orphaned boost rules not represented in the restored map.
     const allRuleIds = new Set([...boostedTabs.values()].flatMap(v => v.ruleIds));
-    const existing = await chrome.declarativeNetRequest.getDynamicRules();
+    const existing = await chrome.declarativeNetRequest.getSessionRules();
     const orphanIds = existing
       .filter(r => r.id >= BOOST_RULE_BASE && r.id < BOOST_RULE_BASE + 100 && !allRuleIds.has(r.id))
       .map(r => r.id);
     if (orphanIds.length > 0) {
-      await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: orphanIds, addRules: [] });
+      await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: orphanIds, addRules: [] });
     }
   } catch (e) {}
 }
@@ -877,7 +877,7 @@ async function boostTab(tabId, host) {
     ];
 
     try {
-      await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds, addRules });
+      await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds, addRules });
       boostedTabs.set(tabId, { ruleIds: [imgId, scriptId, mediaId], host });
       boostedTabsDirty = true;
       await persistBoostedTabs();
@@ -896,7 +896,7 @@ async function clearBoostForTab(tabId) {
   boostedTabs.delete(tabId);
   boostedTabsDirty = true;
   try {
-    await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: info.ruleIds, addRules: [] });
+    await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: info.ruleIds, addRules: [] });
   } catch (e) {}
   await persistBoostedTabs();
 }
