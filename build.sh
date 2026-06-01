@@ -23,6 +23,19 @@ ZIP="potatofy-v${VERSION}.zip"
 echo "Building ${ZIP}..."
 rm -f "${ZIP}"
 
+# Strip the dev-only tests.js script tag from popup.html before packaging.
+# Unpacked installs need the tag so the diagnostics button works; the packaged
+# ZIP excludes tests.js, so the tag would produce a broken resource reference
+# that CWS review automation flags as a policy violation.
+cp popup/popup.html popup/popup.html.orig
+trap 'mv popup/popup.html.orig popup/popup.html 2>/dev/null; true' EXIT
+python3 -c "
+with open('popup/popup.html') as f:
+    lines = f.readlines()
+with open('popup/popup.html', 'w') as f:
+    f.writelines(l for l in lines if 'tests.js' not in l)
+"
+
 zip -r "${ZIP}" \
   "${MANIFEST}" \
   content-script-main.js \
@@ -32,7 +45,10 @@ zip -r "${ZIP}" \
   lib/ \
   rules/ \
   -x "*/.*" \
-  -x "popup/tests.js"
+  -x "popup/tests.js" \
+  -x "*.orig"
+
+mv popup/popup.html.orig popup/popup.html
 
 echo ""
 echo "Contents:"

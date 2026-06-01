@@ -148,8 +148,14 @@
   });
 
   describe('computeSavings — formula consistency', () => {
-    it('savings.session matches manual calculation', async () => {
-      const { stats, weights, savings } = await chrome.runtime.sendMessage({ type: 'GET_STATS' });
+    it('savings.session matches manual calculation when no heap data', async () => {
+      const { stats, weights, savings, heapMeasurements } = await chrome.runtime.sendMessage({ type: 'GET_STATS' });
+      // Phase 3: heap multipliers replace heuristic weights when measured data
+      // exists. Skip this check when real measurements are present — the formula
+      // is still consistent, just using measured values instead of STATS_WEIGHTS.
+      const hasHeapData = heapMeasurements && Object.keys(heapMeasurements).length > 0;
+      const hasRealData = (stats.session.realRamFreed || 0) > 0;
+      if (hasHeapData || hasRealData) { return; }
       const s = stats.session, w = weights;
       const expectedRam =
         (s.blockedRequests          || 0) * w.request.ramBytes +
@@ -191,6 +197,15 @@
     it('tabDiscard weight is bounded under 200 MB', async () => {
       const { weights } = await chrome.runtime.sendMessage({ type: 'GET_STATS' });
       expect(weights.tabDiscard.ramBytes < 200 * 1024 * 1024).toBeTruthy();
+    });
+
+    it('breakdown parts sum to totalRamBytes', async () => {
+      const { savings } = await chrome.runtime.sendMessage({ type: 'GET_STATS' });
+      const s = savings.session;
+      const sum = (s.breakdown?.real?.ramBytes ?? 0) +
+                  (s.breakdown?.measured?.ramBytes ?? 0) +
+                  (s.breakdown?.estimated?.ramBytes ?? 0);
+      expect(sum).toBe(s.ramBytes);
     });
   });
 

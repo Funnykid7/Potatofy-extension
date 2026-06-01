@@ -5,7 +5,7 @@ import { DEFAULT_SETTINGS, ALLOWED_THRESHOLDS, ALLOWED_PRESSURE_MB } from '../li
 const IS_PACKAGED = !!chrome.runtime.getManifest().update_url;
 
 // E3: shared formatters loaded by ../lib/formatters.js classic script.
-const { formatBytes, formatMs } = window.PotatofyFmt;
+const { formatBytes, formatMs, normalizeHost } = window.PotatofyFmt;
 
 // 1.1.2 A3 — used by the whitelist cap warning.
 const MAX_WHITELIST = 199;
@@ -54,10 +54,6 @@ const els = {
 let currentSettings = { ...DEFAULT_SETTINGS };
 let currentHostname = null;
 
-function normalizeHost(h) {
-  return (h || '').replace(/^www\./, '').toLowerCase();
-}
-
 let currentTabId = null;
 
 async function getActiveTab() {
@@ -84,11 +80,16 @@ function mergeSettings(src) {
 }
 
 async function loadSettings() {
-  const data = await chrome.storage.local.get('settings');
-  currentSettings = mergeSettings(data.settings);
+  try {
+    const data = await chrome.storage.local.get('settings');
+    currentSettings = mergeSettings(data.settings);
+  } catch (e) {
+    currentSettings = mergeSettings({});
+  }
 }
 
 let toastTimer = null;
+let toastFadeTimer = null;
 function showToast(msg) {
   // Reuse any existing toast element to avoid stacking.
   let el = document.querySelector('.toast');
@@ -100,9 +101,10 @@ function showToast(msg) {
   el.classList.remove('fade-out');
   el.textContent = msg;
   if (toastTimer) clearTimeout(toastTimer);
+  if (toastFadeTimer) clearTimeout(toastFadeTimer);
   toastTimer = setTimeout(() => {
     el.classList.add('fade-out');
-    setTimeout(() => el.remove(), 200);
+    toastFadeTimer = setTimeout(() => { el.remove(); toastFadeTimer = null; }, 200);
     toastTimer = null;
   }, 3000);
 }
@@ -144,7 +146,11 @@ function renderToggles() {
 // NIT-2 — single place that sets the boost button's default label so neither
 // refreshBoostState nor the click-handler's restore timeout can drift out of sync.
 function setBoostBtnDefault() {
-  els.boostBtn.innerHTML = 'Boost <em>this tab</em>'; // static literal, no user data
+  els.boostBtn.replaceChildren();
+  els.boostBtn.append('Boost ');
+  const em = document.createElement('em');
+  em.textContent = 'this tab';
+  els.boostBtn.appendChild(em);
 }
 
 // D: queries SW for the current tab's boost status and renders an active
@@ -239,10 +245,14 @@ function renderWhitelistList() {
       // the render-time `list`. A settings update (storage.onChanged) can replace
       // currentSettings.whitelist between renders; filtering the stale array would
       // silently drop any entries added since this row was rendered.
-      const cur = currentSettings.whitelist || [];
-      currentSettings.whitelist = cur.filter(h => h !== host);
-      await pushSettings();
-      renderAll();
+      try {
+        const cur = currentSettings.whitelist || [];
+        currentSettings.whitelist = cur.filter(h => h !== host);
+        await pushSettings();
+        renderAll();
+      } catch (e) {
+        showToast('Failed to save — please try again');
+      }
     });
     li.appendChild(span);
     li.appendChild(btn);
@@ -266,9 +276,13 @@ function renderPotatoList() {
     btn.textContent = '×';
     btn.title = `Clear potato mode for ${host}`;
     btn.addEventListener('click', async () => {
-      await chrome.runtime.sendMessage({ type: 'TOGGLE_POTATO_SITE', host, js: false, img: false });
-      await loadSettings();
-      renderAll();
+      try {
+        await chrome.runtime.sendMessage({ type: 'TOGGLE_POTATO_SITE', host, js: false, img: false });
+        await loadSettings();
+        renderAll();
+      } catch (e) {
+        showToast('Failed to save — please try again');
+      }
     });
     li.appendChild(span);
     li.appendChild(btn);
@@ -333,11 +347,11 @@ async function refreshStats() {
     const ramDisplayed = Math.min(savings.ramBytes, capBytes);
     const isCapped = ramDisplayed < savings.ramBytes;
 
-    // Check if we have a real RAM measurement (from actual tab discard)
-    const hasRealMeasurement = (counters.realRamFreed || 0) > 0;
-    const ramPrefix = hasRealMeasurement ? '' : (isCapped ? '≥' : '~');
+    const hasMeasuredData = (counters.realRamFreed || 0) > 0 || (savings.breakdown?.measured?.ramBytes ?? 0) > 0;
+    const ramPrefix = hasMeasuredData ? '' : (isCapped ? '≥' : '~');
+    const ramDisplay = ramPrefix + formatBytes(ramDisplayed);
 
-    els.statRam.textContent  = ramPrefix + formatBytes(ramDisplayed);
+    els.statRam.textContent  = ramDisplay;
     els.statBw.textContent   = '~' + formatBytes(savings.bwBytes);
     els.statCpu.textContent  = '~' + formatMs(savings.cpuMs);
     els.statReq.textContent  = ((counters.blockedRequests || 0) + (counters.blockedFonts || 0)).toLocaleString();
@@ -383,7 +397,11 @@ function bindToggles() {
           els.syncHosts.checked = false;
         }
       }
-      await pushSettings();
+      try {
+        await pushSettings();
+      } catch (e) {
+        showToast('Failed to save — please try again');
+      }
     });
   }
 }
@@ -392,13 +410,21 @@ function bindSuspendControls() {
   els.threshold.addEventListener('change', async () => {
     const v = Number(els.threshold.value);
     currentSettings.idleThresholdMinutes = ALLOWED_THRESHOLDS.includes(v) ? v : 5;
-    await pushSettings();
+    try {
+      await pushSettings();
+    } catch (e) {
+      showToast('Failed to save — please try again');
+    }
   });
 
   els.pressureThresh.addEventListener('change', async () => {
     const v = Number(els.pressureThresh.value);
     currentSettings.memoryPressureThresholdMB = ALLOWED_PRESSURE_MB.includes(v) ? v : 500;
-    await pushSettings();
+    try {
+      await pushSettings();
+    } catch (e) {
+      showToast('Failed to save — please try again');
+    }
   });
 
   els.discardNow.addEventListener('click', async () => {
@@ -440,8 +466,13 @@ function bindSiteActions() {
     // double-click can't re-add a just-removed host (or vice versa).
     // renderWhitelistButton re-enables when renderAll runs.
     els.whitelistBtn.disabled = true;
-    await pushSettings();
-    renderAll();
+    try {
+      await pushSettings();
+      renderAll();
+    } catch (e) {
+      els.whitelistBtn.disabled = false;
+      showToast('Failed to save — please try again');
+    }
   });
 
   els.boostBtn.addEventListener('click', async () => {
@@ -481,21 +512,29 @@ function bindSiteActions() {
   els.killJsBtn.addEventListener('click', async () => {
     if (!currentHostname) return;
     const current = (currentSettings.potatoSites || {})[currentHostname] || { js: false, img: false };
-    await chrome.runtime.sendMessage({
-      type: 'TOGGLE_POTATO_SITE', host: currentHostname, js: !current.js
-    });
-    await loadSettings();
-    renderAll();
+    try {
+      await chrome.runtime.sendMessage({
+        type: 'TOGGLE_POTATO_SITE', host: currentHostname, js: !current.js
+      });
+      await loadSettings();
+      renderAll();
+    } catch (e) {
+      showToast('Failed to save — please try again');
+    }
   });
 
   els.killImgBtn.addEventListener('click', async () => {
     if (!currentHostname) return;
     const current = (currentSettings.potatoSites || {})[currentHostname] || { js: false, img: false };
-    await chrome.runtime.sendMessage({
-      type: 'TOGGLE_POTATO_SITE', host: currentHostname, img: !current.img
-    });
-    await loadSettings();
-    renderAll();
+    try {
+      await chrome.runtime.sendMessage({
+        type: 'TOGGLE_POTATO_SITE', host: currentHostname, img: !current.img
+      });
+      await loadSettings();
+      renderAll();
+    } catch (e) {
+      showToast('Failed to save — please try again');
+    }
   });
 }
 
@@ -503,14 +542,18 @@ function bindStatsControls() {
   els.statsScope.addEventListener('change', refreshStats);
   els.statsReset.addEventListener('click', async () => {
     const scope = els.statsScope.value || 'session';
-    await chrome.runtime.sendMessage({ type: 'RESET_STATS', scope });
-    refreshStats();
+    try {
+      await chrome.runtime.sendMessage({ type: 'RESET_STATS', scope });
+      refreshStats();
+    } catch (e) {
+      showToast('Failed to save — please try again');
+    }
   });
 }
 
 function bindStorageListener() {
   chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName === 'local' && changes.stats) {
+    if (areaName === 'local' && (changes.stats || changes.heapMeasurements || changes.calibratedBandwidth)) {
       refreshStats();
     }
     if (areaName === 'local' && changes.settings) {
@@ -531,9 +574,9 @@ function bindTabActivation() {
     renderWhitelistButton();
     await refreshBoostState();
   };
-  chrome.tabs.onActivated.addListener(refreshSite);
+  chrome.tabs.onActivated.addListener(() => { refreshSite().catch(() => {}); });
   chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-    if (tabId === currentTabId && changeInfo.url) refreshSite();
+    if (tabId === currentTabId && changeInfo.url) refreshSite().catch(() => {});
   });
 }
 
@@ -635,9 +678,18 @@ privacyCheckbox.addEventListener('change', () => {
 privacyAcceptBtn.addEventListener('click', async () => {
   try {
     await chrome.storage.local.set({ privacyAccepted: true });
-    hidePrivacyModal();
   } catch (e) {
     console.error('[Potatofy] Could not save privacy acceptance:', e);
+    return;
+  }
+  try {
+    hidePrivacyModal();
+    await initPopup();
+  } catch (e) {
+    _initDone = false;
+    console.error('[Potatofy] initPopup failed after privacy acceptance:', e);
+    showPrivacyModal();
+    showToast('Something went wrong — please try again');
   }
 });
 
@@ -647,14 +699,10 @@ privacyModal.addEventListener('keydown', (e) => {
   }
 });
 
-document.addEventListener('DOMContentLoaded', async () => {
-  // Check privacy policy acceptance first
-  const accepted = await checkPrivacyAcceptance();
-  if (!accepted) {
-    showPrivacyModal();
-    return;
-  }
-
+let _initDone = false;
+async function initPopup() {
+  if (_initDone) return;
+  _initDone = true;
   currentHostname = await getActiveHostname();
   els.hostname.textContent = currentHostname || 'unavailable';
   await loadSettings();
@@ -676,4 +724,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   refreshStats();
   await refreshBoostState();
+}
+
+document.addEventListener('DOMContentLoaded', async () => {
+  // Check privacy policy acceptance first
+  const accepted = await checkPrivacyAcceptance();
+  if (!accepted) {
+    showPrivacyModal();
+    return;
+  }
+  await initPopup();
 });
