@@ -347,29 +347,9 @@ async function refreshStats() {
     const ramDisplayed = Math.min(savings.ramBytes, capBytes);
     const isCapped = ramDisplayed < savings.ramBytes;
 
-    // Check if we have real measurements (from tab discard + heap measurement)
-    const hasRealMeasurement = (counters.realRamFreed || 0) > 0;
-    const hasHeapMeasurement = (savings.breakdown?.measured?.ramBytes ?? 0) > 0;
-    const hasMeasuredData = hasRealMeasurement || hasHeapMeasurement;
+    const hasMeasuredData = (counters.realRamFreed || 0) > 0 || (savings.breakdown?.measured?.ramBytes ?? 0) > 0;
     const ramPrefix = hasMeasuredData ? '' : (isCapped ? '≥' : '~');
-
-    // Build RAM display with breakdown details
-    let ramDisplay = ramPrefix + formatBytes(ramDisplayed);
-    if (hasMeasuredData && savings.breakdown && !isCapped) {
-      const parts = [];
-      if (hasRealMeasurement && savings.breakdown?.real?.ramBytes) {
-        parts.push(`${formatBytes(savings.breakdown.real.ramBytes)} (measured)`);
-      }
-      if (hasHeapMeasurement && savings.breakdown?.measured?.ramBytes) {
-        parts.push(`${formatBytes(savings.breakdown.measured.ramBytes)} (heap measured)`);
-      }
-      if ((savings.breakdown?.estimated?.ramBytes ?? 0) > 0) {
-        parts.push(`${formatBytes(savings.breakdown.estimated.ramBytes)} (estimated)`);
-      }
-      if (parts.length > 0) {
-        ramDisplay += ` [${parts.join(' + ')}]`;
-      }
-    }
+    const ramDisplay = ramPrefix + formatBytes(ramDisplayed);
 
     els.statRam.textContent  = ramDisplay;
     els.statBw.textContent   = '~' + formatBytes(savings.bwBytes);
