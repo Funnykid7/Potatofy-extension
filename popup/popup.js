@@ -493,6 +493,8 @@ function bindSiteActions() {
           els.boostBtn.classList.add('confirmed');
         } else if (reply && reply.reason === 'whitelisted') {
           els.boostBtn.textContent = 'Whitelisted — no effect';
+        } else if (reply && reply.reason === 'host_mismatch') {
+          els.boostBtn.textContent = 'Tab navigated — try again';
         } else {
           els.boostBtn.textContent = 'Failed';
         }
@@ -733,5 +735,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     showPrivacyModal();
     return;
   }
-  await initPopup();
+  try {
+    await initPopup();
+  } catch (e) {
+    _initDone = false;
+    console.error('[Potatofy] initPopup failed on DOMContentLoaded:', e);
+    showToast('Something went wrong — please try again');
+  }
 });

@@ -349,7 +349,7 @@ async function rehydrateTabLastActive() {
     tabLastActive.clear();
     for (const [k, v] of Object.entries(obj)) {
       const tabId = Number(k);
-      if (!isNaN(tabId)) tabLastActive.set(tabId, v);
+      if (Number.isFinite(tabId) && tabId >= 0) tabLastActive.set(tabId, v);
     }
   } catch (e) {}
 }
@@ -795,8 +795,12 @@ async function rehydrateBoostedTabs() {
     boostedTabs.clear();
     for (const [k, v] of Object.entries(obj)) {
       const tabId = Number(k);
-      if (!isNaN(tabId) && v && Array.isArray(v.ruleIds) &&
+      if (Number.isFinite(tabId) && tabId >= 0 && v && Array.isArray(v.ruleIds) &&
           typeof v.host === 'string' && isValidInitiatorDomain(v.host)) {
+        const validRuleIds = v.ruleIds.filter(
+          id => Number.isInteger(id) && id >= BOOST_RULE_BASE && id < BOOST_RULE_BASE + 100
+        );
+        if (validRuleIds.length !== v.ruleIds.length) continue;
         boostedTabs.set(tabId, v);
         // M-7 — bias boostRuleCounter toward the highest restored slot so the
         // next allocation tends to start beyond live entries. This is a hint,
@@ -1260,16 +1264,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === 'UPDATE_SETTINGS') {
     (async () => {
-      const settings = validateSettings(msg.settings || {});
-      await saveSettings(settings);
-      // H-5 / M-8 — reconcile + dynamic-rule sync + per-site sync under a single
-      // dnr lock so concurrent UPDATE_SETTINGS / boost installs can't interleave.
-      await withLock('dnr', async () => {
-        await reconcileStaticRulesets(settings);
-        await syncDynamicRulesLocked();
-        await syncPotatoSites();
-      });
-      sendResponse({ ok: true });
+      try {
+        const settings = validateSettings(msg.settings || {});
+        await saveSettings(settings);
+        // H-5 / M-8 — reconcile + dynamic-rule sync + per-site sync under a single
+        // dnr lock so concurrent UPDATE_SETTINGS / boost installs can't interleave.
+        await withLock('dnr', async () => {
+          await reconcileStaticRulesets(settings);
+          await syncDynamicRulesLocked();
+          await syncPotatoSites();
+        });
+        sendResponse({ ok: true });
+      } catch (e) {
+        console.warn('[Potatofy] UPDATE_SETTINGS failed:', e);
+        sendResponse({ ok: false });
+      }
     })();
     return true;
   }
@@ -1296,48 +1305,68 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === 'GET_STATS') {
     (async () => {
-      await flushStatsHotToLocal();
-      const stats = await getStats();
-      const cap = await getDeviceCapacityMB();
-      const storedCal = await chrome.storage.local.get('calibratedBandwidth');
-      const calibration = storedCal.calibratedBandwidth || null;
-      const storedHeap = await chrome.storage.local.get('heapMeasurements');
-      const heapMeasurements = storedHeap.heapMeasurements || null;
-      sendResponse({
-        stats,
-        weights: STATS_WEIGHTS,
-        deviceCapacityMB: cap,
-        calibration: calibration,
-        heapMeasurements: heapMeasurements,
-        savings: {
-          session:  computeSavings(stats.session, calibration, heapMeasurements),
-          lifetime: computeSavings(stats.lifetime, calibration, heapMeasurements)
-        }
-      });
+      try {
+        await flushStatsHotToLocal();
+        const stats = await getStats();
+        const cap = await getDeviceCapacityMB();
+        const storedCal = await chrome.storage.local.get('calibratedBandwidth');
+        const calibration = storedCal.calibratedBandwidth || null;
+        const storedHeap = await chrome.storage.local.get('heapMeasurements');
+        const heapMeasurements = storedHeap.heapMeasurements || null;
+        sendResponse({
+          stats,
+          weights: STATS_WEIGHTS,
+          deviceCapacityMB: cap,
+          calibration: calibration,
+          heapMeasurements: heapMeasurements,
+          savings: {
+            session:  computeSavings(stats.session, calibration, heapMeasurements),
+            lifetime: computeSavings(stats.lifetime, calibration, heapMeasurements)
+          }
+        });
+      } catch (e) {
+        console.warn('[Potatofy] GET_STATS failed:', e);
+        sendResponse({ ok: false });
+      }
     })();
     return true;
   }
 
   if (msg.type === 'DISCARD_NOW') {
     (async () => {
-      const count = await discardEligibleTabs({ minIdleMs: 0 });
-      sendResponse({ ok: true, count });
+      try {
+        const count = await discardEligibleTabs({ minIdleMs: 0 });
+        sendResponse({ ok: true, count });
+      } catch (e) {
+        console.warn('[Potatofy] DISCARD_NOW failed:', e);
+        sendResponse({ ok: false });
+      }
     })();
     return true;
   }
 
   if (msg.type === 'RESET_STATS') {
     (async () => {
-      await resetStatsScope(msg.scope);
-      sendResponse({ ok: true });
+      try {
+        await resetStatsScope(msg.scope);
+        sendResponse({ ok: true });
+      } catch (e) {
+        console.warn('[Potatofy] RESET_STATS failed:', e);
+        sendResponse({ ok: false });
+      }
     })();
     return true;
   }
 
   if (msg.type === 'TOGGLE_POTATO_SITE') {
     (async () => {
-      const ok = await setPotatoSite(msg.host, { js: msg.js, img: msg.img });
-      sendResponse({ ok });
+      try {
+        const ok = await setPotatoSite(msg.host, { js: msg.js, img: msg.img });
+        sendResponse({ ok });
+      } catch (e) {
+        console.warn('[Potatofy] TOGGLE_POTATO_SITE failed:', e);
+        sendResponse({ ok: false });
+      }
     })();
     return true;
   }
@@ -1396,6 +1425,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // instead. Page scripts can only ask about their own host — which they
   // already know — so the oracle is closed.
   if (msg.type === 'GET_CONTENT_SETTINGS') {
+    // Page-reachable — apply the same per-tab rate limit as other page-reachable
+    // handlers so a tight loop can't sustain SW wake pressure on a Raspberry Pi.
+    const _gcsTabId = sender && sender.tab ? sender.tab.id : null;
+    if (_gcsTabId !== null && !calibrationRateAllow(_gcsTabId)) {
+      sendResponse({ ok: false });
+      return false;
+    }
     (async () => {
       let host = '';
       if (sender && sender.tab != null) {
