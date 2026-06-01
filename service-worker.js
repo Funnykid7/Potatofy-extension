@@ -827,6 +827,7 @@ async function rehydrateBoostedTabs() {
 async function boostTab(tabId, host) {
   if (typeof tabId !== 'number' || tabId < 0) return { ok: false, reason: 'invalid_tab' };
   if (!isValidInitiatorDomain(host)) return { ok: false, reason: 'invalid_host' };
+  await _wakeReady;
 
   return withLock('dnr', async () => {
     // M-2 — verify that the tab claimed by `tabId` is actually on `host` INSIDE
@@ -1353,8 +1354,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse({ ok: false, reason: 'invalid_tab' });
         return;
       }
-      const result = await boostTab(tabId, host);
-      sendResponse(result);
+      try {
+        const result = await boostTab(tabId, host);
+        sendResponse(result);
+      } catch (e) {
+        console.warn('[Potatofy] boostTab threw:', e);
+        sendResponse({ ok: false, reason: 'install_failed' });
+      }
     })();
     return true;
   }
