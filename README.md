@@ -27,6 +27,7 @@ That gain comes from blocking trackers and ads before they load, suspending tabs
 1. Install Potatofy from chrome web store.
 2. Enjoy boost in performance.
 3. Note: web store version may be behind on features and bug fixes, to use latest version look below to install unoacked section.
+```
 
 ## Install (unpacked)
 
