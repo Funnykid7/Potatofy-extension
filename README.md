@@ -2,7 +2,7 @@
 
 A Chromium MV3 extension that aggressively trims memory, GPU, and network overhead so a Raspberry Pi (or any low-spec box) can browse the modern web without melting.
 
-**Marketing site:** [funnykid7.github.io/Potatofy-extension](https://funnykid7.github.io/Potatofy-extension/) · **License:** GPLv3
+**Website:** [funnykid7.github.io/Potatofy-extension](https://funnykid7.github.io/Potatofy-extension/) · **License:** GPLv3
 
 ---
 
