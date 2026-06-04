@@ -21,6 +21,13 @@ That gain comes from blocking trackers and ads before they load, suspending tabs
 
 ---
 
+## Install (Web store version)
+
+```
+1. Install Potatofy from chrome web store.
+2. Enjoy boost in performance.
+3. Note: web store version may be behind on features and bug fixes, to use latest version look below to install unoacked section.
+
 ## Install (unpacked)
 
 ```
@@ -101,21 +108,11 @@ The content script runs in `"world": "MAIN"` because it must override `window.se
 
 ---
 
-## Packaging for the Chrome Web Store
-
-```bash
-./build.sh
-```
-
-Produces `potatofy-v1.1.4.zip`, excluding `docs/`, `README.md`, `LICENSE`, development scripts, and the diagnostics test suite.
-
----
-
 ## Dev
 
 Edit any file, then click **Reload** on Potatofy's card at `chrome://extensions`. Service-worker logs are behind the "Service worker" link on the same card; popup logs behind right-click → Inspect popup.
 
-Built-in diagnostics: open the popup and click **Run Diagnostics** (visible in dev/unpacked builds only). The suite runs ~35 tests covering formatters, settings round-trip, stats math, boost behaviour, and whitelist storage. The full report renders in the popup itself.
+Built-in diagnostics: open the popup and click **Run Diagnostics** (visible in dev/unpacked builds only). The suite runs tests covering formatters, settings round-trip, stats math, boost behaviour, and whitelist storage. The full report renders in the popup itself.
 
 ---
 
