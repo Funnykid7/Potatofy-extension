@@ -38,7 +38,8 @@ with open('popup/popup.html', 'w') as f:
 
 zip -r "${ZIP}" \
   "${MANIFEST}" \
-  content-script-main.js \
+  content-script.js \
+  main-throttle.js \
   service-worker.js \
   icons/ \
   popup/ \

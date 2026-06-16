@@ -1,5 +1,9 @@
 // Self-contained async test runner. Runs inside the extension popup context so
 // all chrome.* APIs are real — no mocks, no build step needed.
+// QUALITY-01 — now an ES module (loaded with <script type="module">), so it
+// imports the shared formatters directly instead of reading window.PotatofyFmt.
+import { formatBytes, formatMs, normalizeHost } from '../lib/formatters.js';
+
 (function () {
   const suites = [];
   let _current = null;
@@ -51,10 +55,8 @@
     };
   }
 
-  // E3: formatters come from window.PotatofyFmt (lib/formatters.js) — single
-  // source of truth shared with popup.js. Tests still verify the behavior to
-  // catch regressions in the shared module.
-  const { formatBytes, formatMs, normalizeHost } = window.PotatofyFmt;
+  // Formatters are imported at module top (shared with popup.js). The unit suites
+  // below still exercise them to catch regressions in the shared module.
 
   // E2: hoisted so all suites can call it (the duplicate inside
   // GET_STATS — shape was unreachable from the STATS_INCREMENT suite).
@@ -148,16 +150,14 @@
   });
 
   describe('computeSavings — formula consistency', () => {
-    it('savings.session matches manual calculation when no heap data', async () => {
-      const { stats, weights, savings, heapMeasurements } = await chrome.runtime.sendMessage({ type: 'GET_STATS' });
-      // Phase 3: heap multipliers replace heuristic weights when measured data
-      // exists. Skip this check when real measurements are present — the formula
-      // is still consistent, just using measured values instead of STATS_WEIGHTS.
-      const hasHeapData = heapMeasurements && Object.keys(heapMeasurements).length > 0;
-      const hasRealData = (stats.session.realRamFreed || 0) > 0;
-      if (hasHeapData || hasRealData) { return; }
+    it('savings.session matches the documented formula', async () => {
+      // QUALITY-06 — assert the full formula for BOTH paths instead of skipping
+      // on live data. Heap multipliers are gone (PERF-01), so the only branch is
+      // whether a real tab-discard measurement (realRamFreed) replaces the
+      // tabDiscard heuristic. Both cases are derivable from the returned data.
+      const { stats, weights, savings } = await chrome.runtime.sendMessage({ type: 'GET_STATS' });
       const s = stats.session, w = weights;
-      const expectedRam =
+      const estimated =
         (s.blockedRequests          || 0) * w.request.ramBytes +
         (s.blockedFonts             || 0) * w.font.ramBytes +
         (s.tabsDiscarded            || 0) * w.tabDiscard.ramBytes +
@@ -170,6 +170,11 @@
         (s.siteKillerHits           || 0) * w.siteKiller.ramBytes +
         (s.thirdPartyImagesBlocked  || 0) * w.thirdPartyImage.ramBytes +
         (s.videosPreloadNoned       || 0) * w.videoPreload.ramBytes;
+      const real = s.realRamFreed || 0;
+      const tabDiscardHeuristic = (s.tabsDiscarded || 0) * w.tabDiscard.ramBytes;
+      const expectedRam = real > 0
+        ? real + Math.max(0, estimated - tabDiscardHeuristic)
+        : estimated;
       expect(savings.session.ramBytes).toBe(expectedRam);
     });
 
@@ -200,10 +205,10 @@
     });
 
     it('breakdown parts sum to totalRamBytes', async () => {
+      // Breakdown is now 2-part: real (measured tab-discard) + estimated.
       const { savings } = await chrome.runtime.sendMessage({ type: 'GET_STATS' });
       const s = savings.session;
       const sum = (s.breakdown?.real?.ramBytes ?? 0) +
-                  (s.breakdown?.measured?.ramBytes ?? 0) +
                   (s.breakdown?.estimated?.ramBytes ?? 0);
       expect(sum).toBe(s.ramBytes);
     });
@@ -324,36 +329,47 @@
   });
 
   describe('UPDATE_SETTINGS validation (1.1.2 A4)', () => {
+    // QUALITY-09 — restore in try/finally so a failed assertion can't leave the
+    // user's real settings stuck in the synthetic test state.
     it('non-array whitelist coerces to empty array', async () => {
       const original = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
-      await chrome.runtime.sendMessage({
-        type: 'UPDATE_SETTINGS',
-        settings: { ...original, whitelist: 'not-an-array' }
-      });
-      const readBack = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
-      expect(Array.isArray(readBack.whitelist)).toBeTruthy();
-      await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
+      try {
+        await chrome.runtime.sendMessage({
+          type: 'UPDATE_SETTINGS',
+          settings: { ...original, whitelist: 'not-an-array' }
+        });
+        const readBack = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
+        expect(Array.isArray(readBack.whitelist)).toBeTruthy();
+      } finally {
+        await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
+      }
     });
     it('non-boolean toggle rejected, default preserved', async () => {
       const original = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
-      await chrome.runtime.sendMessage({
-        type: 'UPDATE_SETTINGS',
-        settings: { ...original, blockingEnabled: 'yes please' }
-      });
-      const readBack = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
-      expect(typeof readBack.blockingEnabled).toBe('boolean');
-      await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
+      try {
+        await chrome.runtime.sendMessage({
+          type: 'UPDATE_SETTINGS',
+          settings: { ...original, blockingEnabled: 'yes please' }
+        });
+        const readBack = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
+        expect(typeof readBack.blockingEnabled).toBe('boolean');
+      } finally {
+        await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
+      }
     });
     it('out-of-range idleThresholdMinutes falls back to default', async () => {
       const original = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
-      await chrome.runtime.sendMessage({
-        type: 'UPDATE_SETTINGS',
-        settings: { ...original, idleThresholdMinutes: 999 }
-      });
-      const readBack = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
-      // 999 is not in ALLOWED_THRESHOLDS so the default (5) must be used.
-      expect(readBack.idleThresholdMinutes).toBe(5);
-      await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
+      try {
+        await chrome.runtime.sendMessage({
+          type: 'UPDATE_SETTINGS',
+          settings: { ...original, idleThresholdMinutes: 999 }
+        });
+        const readBack = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
+        // 999 is not in ALLOWED_THRESHOLDS so the default (5) must be used.
+        expect(readBack.idleThresholdMinutes).toBe(5);
+      } finally {
+        await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
+      }
     });
   });
 

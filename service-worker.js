@@ -1,15 +1,12 @@
 import { DEFAULT_SETTINGS, ALLOWED_THRESHOLDS, ALLOWED_PRESSURE_MB } from './lib/defaults.js';
 import { STATS_WEIGHTS, EMPTY_COUNTERS, computeSavings, median } from './lib/stats-weights.js';
+import { normalizeHost } from './lib/formatters.js';
 
 // Per-flush upper bound on stat increments. Guards against compromised content
 // scripts or buggy reporters from corrupting lifetime counters with absurd
 // values (e.g. Number.MAX_SAFE_INTEGER). Per-second pageload counts realistic
 // only into the low thousands; 100k gives ~50x headroom.
 const MAX_INCREMENT = 100_000;
-
-// Phase 3 — upper bound on a single heap measurement. V8's practical heap
-// limit is ~4 GB; 512 MB is a generous ceiling for any single feature's delta.
-const MAX_HEAP_FREED_BYTES = 512 * 1024 * 1024;
 
 // Phase 2 — upper bound per calibration category. Legitimate resource sizes
 // stay well below 100 MB; values above this indicate a spoofed message from
@@ -23,9 +20,9 @@ const MAX_CALIBRATION_BYTES = 100_000_000;
 // counters), and stays well inside JS safe-integer range.
 const MAX_COUNTER_VALUE = 1_000_000_000;
 
-// 1.1.3 — per-tab rate limit for STATS_INCREMENT. Page scripts in the
-// MAIN-world context can call this handler. Cap each tab to STATS_RATE_MAX
-// messages per STATS_RATE_WINDOW_MS. Excess is dropped silently so the page
+// Per-tab rate limit for STATS_INCREMENT (defense-in-depth; the legitimate sender
+// is our own ISOLATED-world content script). Cap each tab to STATS_RATE_MAX
+// messages per STATS_RATE_WINDOW_MS. Excess is dropped silently so a caller
 // cannot infer the rate limit and adapt to it.
 const STATS_RATE_WINDOW_MS = 10_000;
 const STATS_RATE_MAX = 500;
@@ -45,10 +42,12 @@ const PRIVILEGED_MESSAGE_TYPES = new Set([
   // Writes
   'UPDATE_SETTINGS', 'BOOST_TAB', 'CLEAR_BOOST', 'DISCARD_NOW',
   'RESET_STATS', 'TOGGLE_POTATO_SITE',
-  // Reads that leak host lists, stats, or extension state. All callers are
-  // popup / tests.js (sender.tab undefined) — the privileged check passes
-  // them through. Page scripts in the MAIN-world content script's context
-  // can reach chrome.runtime via window.chrome; this set keeps them out.
+  // Reads that leak host lists, stats, or extension state. All legitimate callers
+  // are popup / tests.js (sender.tab undefined) — the privileged check passes them
+  // through and rejects any tab sender. Since SEC-01 (content script moved to the
+  // ISOLATED world; MAIN-world page scripts can't reach chrome.runtime) this is
+  // defense-in-depth rather than an actively-reachable surface, but it stays so the
+  // guarantee holds even if a content-script bug or refactor ever forwards these.
   'GET_SETTINGS', 'GET_STATS', 'GET_BOOST_STATUS', 'GET_SITE_KILLERS'
 ]);
 
@@ -97,10 +96,9 @@ async function getSiteKillers() {
   return siteKillerCache;
 }
 
-// SW-local copy — service workers cannot import ES modules, so lib/formatters.js cannot be shared here.
-function normalizeHost(h) {
-  return (h || '').replace(/^www\./, '').toLowerCase();
-}
+// QUALITY-03 — normalizeHost is imported from lib/formatters.js (the SW is a
+// `type: module` worker and already imports other lib modules), so the duplicate
+// local copy is gone.
 
 function isHostWhitelisted(hostname, whitelist) {
   const host = normalizeHost(hostname);
@@ -127,23 +125,25 @@ function killersForHost(hostname, killerMap) {
 // fetches settings + killerMap from storage) and broadcastSettingsUpdate
 // (which fetches them ONCE outside the loop). Avoids N×storage I/O per
 // settings change.
+// QUALITY-05 — one list of the boolean feature flags sent to the content script,
+// so adding a content toggle is a single-line change here (kept in sync with the
+// content script's `settings` object).
+const CONTENT_DETAIL_BOOL_KEYS = [
+  'jsThrottleEnabled', 'imageLazyEnabled', 'imageLowQualityEnabled',
+  'animationKillEnabled', 'autoplayKillEnabled', 'prefetchStripEnabled',
+  'videoPauseEnabled', 'videoPreloadNoneEnabled', 'siteKillersEnabled'
+];
+
 function buildContentDetailFromCache(hostname, settings, killerMap) {
   const whitelisted = isHostWhitelisted(hostname, settings.whitelist);
   const siteKillers = (settings.siteKillersEnabled && !whitelisted)
     ? killersForHost(hostname, killerMap)
     : [];
-  return {
-    jsThrottleEnabled:       !!settings.jsThrottleEnabled       && !whitelisted,
-    imageLazyEnabled:        !!settings.imageLazyEnabled        && !whitelisted,
-    imageLowQualityEnabled:  !!settings.imageLowQualityEnabled  && !whitelisted,
-    animationKillEnabled:    !!settings.animationKillEnabled    && !whitelisted,
-    autoplayKillEnabled:     !!settings.autoplayKillEnabled     && !whitelisted,
-    prefetchStripEnabled:    !!settings.prefetchStripEnabled    && !whitelisted,
-    videoPauseEnabled:       !!settings.videoPauseEnabled       && !whitelisted,
-    videoPreloadNoneEnabled: !!settings.videoPreloadNoneEnabled && !whitelisted,
-    siteKillersEnabled:      !!settings.siteKillersEnabled      && !whitelisted,
-    siteKillers
-  };
+  const detail = { siteKillers };
+  for (const k of CONTENT_DETAIL_BOOL_KEYS) {
+    detail[k] = !!settings[k] && !whitelisted;
+  }
+  return detail;
 }
 
 async function buildContentDetail(hostname) {
@@ -153,10 +153,11 @@ async function buildContentDetail(hostname) {
 }
 
 // Broadcast settings update to every content script in every tab. Used by the
-// chrome.storage.onChanged listener so popup/settings changes propagate
-// without the isolated/MAIN-world CustomEvent bus (which was the Finding 1
-// attack surface). chrome.tabs.sendMessage delivers to all content scripts
-// in the tab; MAIN-world scripts receive via chrome.runtime.onMessage.
+// chrome.storage.onChanged listener so popup/settings changes propagate without
+// the old CustomEvent bus (which was the Finding 1 attack surface).
+// chrome.tabs.sendMessage delivers to the ISOLATED-world content script via
+// chrome.runtime.onMessage, which applies them and relays jsThrottleEnabled to
+// the MAIN-world throttle snippet over postMessage.
 //
 // 1.1.3 — settings + killerMap are fetched ONCE per broadcast (was N times).
 async function broadcastSettingsUpdate() {
@@ -175,6 +176,9 @@ async function broadcastSettingsUpdate() {
   const sends = [];
   for (const tab of tabs) {
     if (!tab.id || !tab.url) continue;
+    // PERF-11 — skip discarded tabs: they have no live content script, so the
+    // send just rejects (extra failed IPC + churn) for nothing.
+    if (tab.discarded) continue;
     if (!/^https?:/.test(tab.url)) continue;
     let hostname = '';
     try { hostname = new URL(tab.url).hostname; } catch (e) { continue; }
@@ -212,41 +216,47 @@ async function getSettings() {
   return { ...DEFAULT_SETTINGS, ...(settings || {}) };
 }
 
+// PRECONDITION: caller must already hold withLock('settings'). This is the body
+// of saveSettings without the lock, so a read-modify-write caller (QA-02, e.g.
+// setPotatoSite) can do its read, mutation, and this write inside ONE lock
+// acquisition without deadlocking on a re-entrant nested withLock('settings').
+async function saveSettingsLocked(settings) {
+  await chrome.storage.local.set({ settings });
+  if (settings.useCloudSync) {
+    // Privacy default: ship only feature toggles + numeric thresholds. The
+    // whitelist and per-site potato map describe browsing habits and stay
+    // local unless the user explicitly opts in via syncHostsToCloud.
+    const syncPayload = { ...settings };
+    if (!settings.syncHostsToCloud) {
+      delete syncPayload.whitelist;
+      delete syncPayload.potatoSites;
+      // 1.1.3 — actively purge host data that pre-existed the opt-out.
+      // Without this, a previously-synced whitelist lingers on Google's
+      // servers and can be re-imported on a fresh device via
+      // migrateLegacySync (Sec.HIGH.4).
+      try {
+        const existing = await chrome.storage.sync.get('settings');
+        if (existing.settings && (existing.settings.whitelist || existing.settings.potatoSites)) {
+          const cleaned = { ...existing.settings };
+          delete cleaned.whitelist;
+          delete cleaned.potatoSites;
+          await chrome.storage.sync.set({ settings: cleaned });
+        }
+      } catch (e) {}
+    }
+    try { await chrome.storage.sync.set({ settings: syncPayload }); } catch (e) {}
+  } else {
+    // useCloudSync off entirely — wipe the sync area so nothing lives on
+    // Google's servers. Opting out IS the consent; no confirmation prompt.
+    try { await chrome.storage.sync.clear(); } catch (e) {}
+  }
+}
+
 async function saveSettings(settings) {
   // 1.1.3 — serialize the local + sync writes so two rapid UPDATE_SETTINGS
   // calls cannot interleave their sync writes and leave the sync store with
   // a stale older value (Sec.MEDIUM.11).
-  return withLock('settings', async () => {
-    await chrome.storage.local.set({ settings });
-    if (settings.useCloudSync) {
-      // Privacy default: ship only feature toggles + numeric thresholds. The
-      // whitelist and per-site potato map describe browsing habits and stay
-      // local unless the user explicitly opts in via syncHostsToCloud.
-      const syncPayload = { ...settings };
-      if (!settings.syncHostsToCloud) {
-        delete syncPayload.whitelist;
-        delete syncPayload.potatoSites;
-        // 1.1.3 — actively purge host data that pre-existed the opt-out.
-        // Without this, a previously-synced whitelist lingers on Google's
-        // servers and can be re-imported on a fresh device via
-        // migrateLegacySync (Sec.HIGH.4).
-        try {
-          const existing = await chrome.storage.sync.get('settings');
-          if (existing.settings && (existing.settings.whitelist || existing.settings.potatoSites)) {
-            const cleaned = { ...existing.settings };
-            delete cleaned.whitelist;
-            delete cleaned.potatoSites;
-            await chrome.storage.sync.set({ settings: cleaned });
-          }
-        } catch (e) {}
-      }
-      try { await chrome.storage.sync.set({ settings: syncPayload }); } catch (e) {}
-    } else {
-      // useCloudSync off entirely — wipe the sync area so nothing lives on
-      // Google's servers. Opting out IS the consent; no confirmation prompt.
-      try { await chrome.storage.sync.clear(); } catch (e) {}
-    }
-  });
+  return withLock('settings', () => saveSettingsLocked(settings));
 }
 
 async function migrateLegacySync() {
@@ -354,14 +364,33 @@ async function rehydrateTabLastActive() {
   } catch (e) {}
 }
 
+let persistTabTimer = null;
+// PERF-12 / QA-09 — persist tab activity EVENT-DRIVEN (debounced) instead of via a
+// dedicated 1-min wake alarm (which kept the SW from ever suspending) and without
+// relying on the unreliable onSuspend (which can't await async work). A pending
+// setTimeout keeps the SW alive until it fires (same pattern as scheduleBroadcast),
+// so the debounced write lands; the debounce coalesces rapid tab switches into one
+// write (kind to SD-card-backed Pi storage).
+function schedulePersistTabLastActive() {
+  if (persistTabTimer) return;
+  persistTabTimer = setTimeout(() => {
+    persistTabTimer = null;
+    persistTabLastActive().catch(() => {});
+  }, 2000);
+}
+
 function updateTabActivity(tabId) {
   if (typeof tabId !== 'number') return;
   tabLastActive.set(tabId, Date.now());
   tabLastActiveDirty = true;
+  schedulePersistTabLastActive();
 }
 
 function removeTabActivity(tabId) {
-  if (tabLastActive.delete(tabId)) tabLastActiveDirty = true;
+  if (tabLastActive.delete(tabId)) {
+    tabLastActiveDirty = true;
+    schedulePersistTabLastActive();
+  }
 }
 
 async function persistTabLastActive() {
@@ -392,6 +421,12 @@ async function rehydrateStatsHot() {
 }
 
 async function bufferIncrement(patch) {
+  // QA-03 — wait for the wake-time rehydration to finish before touching statsHot,
+  // so two increments racing right after a SW wake don't both run rehydrateStatsHot
+  // in parallel (the slower write clobbering the faster). _wakeReady already runs
+  // rehydrateStatsHot once on every wake; awaiting it makes the guard below a
+  // no-op on the hot path while closing the cold-start race.
+  await _wakeReady;
   if (!statsHotRehydrated) await rehydrateStatsHot();
   let any = false;
   for (const k of Object.keys(patch)) {
@@ -443,12 +478,6 @@ async function flushStatsHotToLocal() {
   });
 }
 
-// Phase 3 — whitelisted feature names for heap measurements.
-const VALID_HEAP_FEATURES = new Set([
-  'animationsKilled', 'videosPaused', 'videosPreloadNoned',
-  'autoplayKilled', 'imagesLazied', 'siteKillerHits'
-]);
-
 // Phase 2 — validates that calibration data from content script has the
 // expected shape before writing to storage.
 function isValidCalibrationData(d) {
@@ -457,6 +486,74 @@ function isValidCalibrationData(d) {
     if (!Number.isFinite(d[k]) || d[k] < 0 || d[k] > MAX_CALIBRATION_BYTES) return false;
   }
   return true;
+}
+
+// ---------- Bandwidth calibration (in-memory buffer) ----------
+// PERF-10 / SEC-03 / QA-17 — calibration samples previously hit chrome.storage on
+// EVERY message (constant LevelDB I/O on a Pi SD card) via an UNLOCKED
+// read-modify-write (lost updates under multi-tab concurrency), and pushed
+// ZERO-valued categories that decayed real samples out of a single shared
+// 100-entry window. Now: per-category in-memory rolling windows holding only
+// non-zero samples, persisted to storage on the periodic stats-flush alarm.
+const CALIB_CATEGORIES = ['trackers', 'fonts', 'scripts', 'images'];
+const CALIB_MAX = 100;
+const calibHistory = { trackers: [], fonts: [], scripts: [], images: [] };
+let calibDirty = false;
+
+async function rehydrateCalibration() {
+  try {
+    const s = await chrome.storage.local.get('calibrationHistory');
+    const h = s.calibrationHistory;
+    if (h && typeof h === 'object' && !Array.isArray(h)) {
+      for (const cat of CALIB_CATEGORIES) {
+        if (Array.isArray(h[cat])) {
+          calibHistory[cat] = h[cat].filter(x => Number.isFinite(x) && x > 0).slice(-CALIB_MAX);
+        }
+      }
+    }
+  } catch (e) {}
+}
+
+function recordCalibration(data) {
+  // QA-17 — append only NON-ZERO samples, with a separate window per category so
+  // a rarely-loaded category (e.g. fonts) can't flush other categories' real
+  // samples out of a shared window.
+  let changed = false;
+  for (const cat of CALIB_CATEGORIES) {
+    const v = data[cat];
+    if (Number.isFinite(v) && v > 0) {
+      const arr = calibHistory[cat];
+      arr.push(v);
+      if (arr.length > CALIB_MAX) arr.shift();
+      changed = true;
+    }
+  }
+  if (changed) calibDirty = true;
+}
+
+function computeCalibration() {
+  let any = false;
+  const out = {};
+  for (const cat of CALIB_CATEGORIES) {
+    out[cat] = median(calibHistory[cat]); // median([]) === 0
+    if (calibHistory[cat].length > 0) any = true;
+  }
+  if (!any) return null;
+  out.lastUpdated = Date.now();
+  return out;
+}
+
+async function flushCalibration() {
+  if (!calibDirty) return;
+  calibDirty = false;
+  try {
+    await chrome.storage.local.set({
+      calibrationHistory: { ...calibHistory },
+      calibratedBandwidth: computeCalibration()
+    });
+  } catch (e) {
+    console.warn('[Potatofy] calibration flush failed:', e && e.message ? e.message : e);
+  }
 }
 
 // 1.1.3 — per-tab rate limiter for STATS_INCREMENT. Returns true if the call
@@ -475,7 +572,7 @@ function statsRateAllow(tabId) {
   return true;
 }
 
-// Separate rate-limit bucket for CALIBRATE_BANDWIDTH and HEAP_MEASUREMENT so
+// Separate rate-limit bucket for CALIBRATE_BANDWIDTH and GET_CONTENT_SETTINGS so
 // a burst of DOM-mutation stats can't exhaust their budget and drop calibration data.
 function calibrationRateAllow(tabId) {
   if (tabId == null) return true;
@@ -547,8 +644,32 @@ function isValidInitiatorDomain(host) {
   if (typeof host !== 'string') return false;
   const h = host.trim().toLowerCase();
   if (!h || h.length > 253) return false;
+  // QA-14 — accept local development hosts so Raspberry Pi (and other) users can
+  // whitelist / manage settings for their own servers. These previously failed
+  // the public-domain regex and were silently dropped, so the popup briefly showed
+  // them whitelisted and then reverted.
+  if (h === 'localhost' || h === '::1') return true;
+  if (h.endsWith('.local') || h.endsWith('.lan') || h.endsWith('.localhost')) return true;
+  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)) return true;          // loopback
+  if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)) return true;           // RFC-1918
+  if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(h)) return true;             // RFC-1918
+  if (/^172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/.test(h)) return true; // RFC-1918
+  // Public domains: at least one dot + a 2+ char alphabetic TLD; bare public IPs rejected.
   if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(h)) return false;
   if (!/\.[a-z]{2,}$/.test(h)) return false;
+  if (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(h)) return false;
+  return true;
+}
+
+// QA-14 — Chrome's DNR initiatorDomains matches hostnames; bare IP literals are
+// not reliably matchable there. We still accept local IPs for whitelist / potato /
+// boost bookkeeping (so settings persist and the content layer + contentSettings
+// exemptions apply via isHostWhitelisted), but skip emitting DNR allow-rules for
+// them. Hostname-form locals (localhost, *.local) are fine for DNR.
+function isDnrInitiatorDomain(host) {
+  if (!isValidInitiatorDomain(host)) return false;
+  const h = host.trim().toLowerCase();
+  if (h === '::1') return false;
   if (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(h)) return false;
   return true;
 }
@@ -614,16 +735,22 @@ async function syncDynamicRulesLocked() {
     // Anything past the cap would orphan rules — inManagedRange wouldn't pick
     // them up on the next sync and they'd accumulate until the 5000-rule
     // dynamic budget is exhausted.
+    // QA-14 — emit DNR allow-rules only for DNR-matchable hosts (skips bare IPs).
     const valid = (settings.whitelist || [])
-      .filter(isValidInitiatorDomain)
+      .filter(isDnrInitiatorDomain)
       .slice(0, MAX_WHITELIST);
     const addRules = valid.map((h, i) => buildWhitelistRule(h, DYNAMIC_RULE_WHITELIST_BASE + i));
 
+    // QUALITY-07 — do NOT pass excludedInitiatorDomains. The priority-100 whitelist
+    // allow-rules above already override these priority-50 block rules for
+    // whitelisted hosts, so the exclusion list was redundant — and dropping it
+    // sidesteps Chrome's per-condition domain-count limit when the whitelist is large
+    // (the old code silently lost 3rd-party blocking once the whitelist exceeded it).
     if (settings.thirdPartyScriptBlockEnabled) {
-      addRules.push(buildThirdPartyBlockRule(DYNAMIC_RULE_3P_SCRIPT_ID, 'script', valid));
+      addRules.push(buildThirdPartyBlockRule(DYNAMIC_RULE_3P_SCRIPT_ID, 'script', null));
     }
     if (settings.foregroundPotatoEnabled) {
-      addRules.push(buildThirdPartyBlockRule(DYNAMIC_RULE_3P_IMAGE_ID, 'image', valid));
+      addRules.push(buildThirdPartyBlockRule(DYNAMIC_RULE_3P_IMAGE_ID, 'image', null));
     }
 
     try {
@@ -668,59 +795,53 @@ async function reconcileStaticRulesets(settings) {
 
 async function syncPotatoSites() {
   if (!chrome.contentSettings) return;
+  // QA-05 — reconcile from scratch: clear ALL of the extension's own
+  // contentSettings overrides, then write ONLY active 'block' rules. The old code
+  // wrote 'allow' for non-blocked sites, which overrode the user's own global
+  // default (e.g. globally-blocked JS got force-allowed) and left a permanent
+  // per-site record cluttering the profile. Clearing first + only emitting blocks
+  // means a removed/disabled site reverts to the user's default.
+  try { await chrome.contentSettings.javascript.clear({}); } catch (e) {}
+  try { await chrome.contentSettings.images.clear({}); } catch (e) {}
   const settings = await getSettings();
   const sites = settings.potatoSites || {};
   for (const [host, opts] of Object.entries(sites)) {
     if (!isValidInitiatorDomain(host)) continue;
     for (const primaryPattern of [`*://*.${host}/*`, `*://${host}/*`]) {
-      try {
-        await chrome.contentSettings.javascript.set({
-          primaryPattern,
-          setting: opts.js ? 'block' : 'allow'
-        });
-      } catch (e) {}
-      try {
-        await chrome.contentSettings.images.set({
-          primaryPattern,
-          setting: opts.img ? 'block' : 'allow'
-        });
-      } catch (e) {}
+      if (opts.js) {
+        try { await chrome.contentSettings.javascript.set({ primaryPattern, setting: 'block' }); } catch (e) {}
+      }
+      if (opts.img) {
+        try { await chrome.contentSettings.images.set({ primaryPattern, setting: 'block' }); } catch (e) {}
+      }
     }
   }
 }
 
 async function setPotatoSite(host, opts) {
   if (!isValidInitiatorDomain(host)) return false;
-  const settings = await getSettings();
-  const sites = { ...(settings.potatoSites || {}) };
-  const current = sites[host] || { js: false, img: false };
-  const next = {
-    js:  opts.js  !== undefined ? !!opts.js  : current.js,
-    img: opts.img !== undefined ? !!opts.img : current.img
-  };
-  if (!next.js && !next.img) {
-    delete sites[host];
-  } else {
-    sites[host] = next;
-  }
-  settings.potatoSites = sites;
-  await saveSettings(settings);
+  // QA-02 — read + modify + write atomically under the settings lock so a
+  // concurrent UPDATE_SETTINGS can't clobber this per-site change (or vice-versa).
+  // saveSettingsLocked (not saveSettings) avoids re-entering the held lock.
+  await withLock('settings', async () => {
+    const settings = await getSettings();
+    const sites = { ...(settings.potatoSites || {}) };
+    const current = sites[host] || { js: false, img: false };
+    const next = {
+      js:  opts.js  !== undefined ? !!opts.js  : current.js,
+      img: opts.img !== undefined ? !!opts.img : current.img
+    };
+    if (!next.js && !next.img) delete sites[host];
+    else sites[host] = next;
+    settings.potatoSites = sites;
+    await saveSettingsLocked(settings);
+  });
 
+  // QA-05 — reconcile contentSettings (clear-all + re-apply only active blocks)
+  // under the same 'dnr' lock the other sync paths (bootstrap, UPDATE_SETTINGS)
+  // use, so the clear can't interleave with a concurrent reconcile.
   if (chrome.contentSettings) {
-    for (const primaryPattern of [`*://*.${host}/*`, `*://${host}/*`]) {
-      try {
-        await chrome.contentSettings.javascript.set({
-          primaryPattern,
-          setting: next.js ? 'block' : 'allow'
-        });
-      } catch (e) {}
-      try {
-        await chrome.contentSettings.images.set({
-          primaryPattern,
-          setting: next.img ? 'block' : 'allow'
-        });
-      } catch (e) {}
-    }
+    await withLock('dnr', () => syncPotatoSites());
   }
   return true;
 }
@@ -894,7 +1015,9 @@ async function boostTab(tabId, host) {
   });
 }
 
-async function clearBoostForTab(tabId) {
+// PRECONDITION: caller holds withLock('dnr'). The teardown body without the lock,
+// so the navigation path (which already holds the lock) can reuse it.
+async function clearBoostForTabLocked(tabId) {
   const info = boostedTabs.get(tabId);
   if (!info) return;
   boostedTabs.delete(tabId);
@@ -905,21 +1028,34 @@ async function clearBoostForTab(tabId) {
   await persistBoostedTabs();
 }
 
+async function clearBoostForTab(tabId) {
+  // QA-04 — serialize under the same 'dnr' lock boostTab holds, so a clear that
+  // arrives WHILE a boost is mid-install runs AFTER the install commits to
+  // boostedTabs (instead of finding it empty, no-op'ing, and leaving rules
+  // orphaned on a tab that has navigated away).
+  return withLock('dnr', () => clearBoostForTabLocked(tabId));
+}
+
 async function maybeClearBoostOnNavigation(tabId, newUrl) {
-  const info = boostedTabs.get(tabId);
-  if (!info || !newUrl) return;
+  if (!newUrl) return;
   // Ignore non-http(s) schemes (about:blank flashes during SPA routing,
-  // data:, chrome://, etc.). new URL('about:blank') throws — the old catch
-  // swallowed it but left the boost installed; that's actually what we want,
-  // so make the intent explicit here.
+  // data:, chrome://, etc.). We deliberately leave the boost installed for those.
   if (!newUrl.startsWith('http://') && !newUrl.startsWith('https://')) return;
+  let newHost;
   try {
-    const u = new URL(newUrl);
-    const newHost = u.hostname.replace(/^www\./, '').toLowerCase();
+    newHost = new URL(newUrl).hostname.replace(/^www\./, '').toLowerCase();
+  } catch (e) { return; }
+  // QA-04 — do the lookup + host comparison + teardown INSIDE the 'dnr' lock so a
+  // boost still installing for this tab has committed to boostedTabs before we
+  // read it. The old code read boostedTabs unlocked and returned early when the
+  // install hadn't landed yet, leaving the boost active after navigation.
+  await withLock('dnr', async () => {
+    const info = boostedTabs.get(tabId);
+    if (!info) return;
     if (newHost !== info.host && !newHost.endsWith('.' + info.host)) {
-      await clearBoostForTab(tabId);
+      await clearBoostForTabLocked(tabId);
     }
-  } catch (e) {}
+  });
 }
 
 // ---------- Tab discard ----------
@@ -949,7 +1085,13 @@ async function discardEligibleTabs({ minIdleMs = 0 } = {}) {
     for (const tab of (win.tabs || [])) {
       if (shouldSkipTabForDiscard(tab, activeId)) continue;
       if (minIdleMs > 0) {
-        const lastActive = tabLastActive.get(tab.id) || 0;
+        // QA-01 — fall back to the tab's own lastAccessed (Chrome 121+), then to
+        // `now`, when we have no recorded activity. Tabs that pre-existed this SW
+        // wake or were restored on browser startup have no tabLastActive entry
+        // until session storage repopulates it; the old `|| 0` made (now - 0)
+        // exceed any threshold, so every such tab was discarded on the first idle
+        // check (~1 min after startup), ignoring the user's idle threshold.
+        const lastActive = tabLastActive.get(tab.id) || tab.lastAccessed || now;
         if (now - lastActive < minIdleMs) continue;
       }
       candidates.push(tab.id);
@@ -979,6 +1121,11 @@ async function discardEligibleTabs({ minIdleMs = 0 } = {}) {
   // Measure free memory AFTER discard and calculate real freed RAM
   if (discarded > 0) {
     let realFreedBytes = 0;
+    // PERF-02 — give the OS time to reclaim the discarded renderers' memory before
+    // measuring. Querying immediately (as the old code did) catches the processes
+    // mid-teardown, so availableCapacity has barely moved and realRamFreed reads ~0,
+    // under-reporting the extension's single most concrete benefit.
+    await new Promise(r => setTimeout(r, 750));
     try {
       if (chrome.system && chrome.system.memory && memBefore !== null) {
         const info = await chrome.system.memory.getInfo();
@@ -1121,17 +1268,20 @@ if (!IS_PACKAGED &&
 // ---------- Alarms ----------
 
 async function setupAlarms() {
-  // 15-second flush interval: onSuspend can't await async work, so any
-  // counters still in the hot buffer when the SW is terminated are lost.
-  // Halving the cadence halves the worst-case loss on Pi-class devices
-  // where the SW gets terminated under memory pressure frequently.
+  // QA-06 / PERF-09 — chrome.alarms clamps any period < 1 min to 1 min in PACKAGED
+  // builds, so the old sub-minute cadences (0.25 / 0.5) were a fiction in
+  // production. Use honest >=1 min periods. PERF-12 — ALARM_TAB_PERSIST is gone:
+  // tab activity is persisted event-driven (schedulePersistTabLastActive), so the
+  // SW no longer wakes every minute just to write it. Net: 4 alarms, all 1 min.
   const desired = {
-    [ALARM_IDLE]:        { periodInMinutes: 1    },
-    [ALARM_STATS_FLUSH]: { periodInMinutes: 0.25 },
-    [ALARM_TAB_PERSIST]: { periodInMinutes: 0.5  },
-    [ALARM_DNR_POLL]:    { periodInMinutes: 1    },
-    [ALARM_PRESSURE]:    { periodInMinutes: 0.5  },
+    [ALARM_IDLE]:        { periodInMinutes: 1 },
+    [ALARM_STATS_FLUSH]: { periodInMinutes: 1 },
+    [ALARM_DNR_POLL]:    { periodInMinutes: 1 },
+    [ALARM_PRESSURE]:    { periodInMinutes: 1 },
   };
+  // Clear an obsolete ALARM_TAB_PERSIST left over from an upgraded install so it
+  // doesn't keep waking the worker with no handler.
+  try { await chrome.alarms.clear(ALARM_TAB_PERSIST); } catch (e) {}
   for (const [name, opts] of Object.entries(desired)) {
     const existing = await chrome.alarms.get(name);
     // L-5 — recreate when the period changed across an extension upgrade.
@@ -1146,6 +1296,13 @@ async function setupAlarms() {
 // ---------- Lifecycle ----------
 
 async function bootstrap(isStartup) {
+  // QA-07 — register alarms FIRST, in their own try/catch, so a failure in any
+  // later step (migration, settings read, DNR sync) can't leave the extension
+  // with no background tasks at all (tab suspension, stats flush, DNR poll, memory
+  // pressure all dead). Alarms don't depend on settings, so ordering them first
+  // is safe.
+  try { await setupAlarms(); } catch (e) { console.warn('[Potatofy] setupAlarms failed:', e); }
+
   await migrateLegacySync();
   // H-4 — wait for in-memory state (boostedTabs, tabLastActive, statsHot) to
   // rehydrate before saveSettings fires a storage.onChanged broadcast and before
@@ -1171,7 +1328,6 @@ async function bootstrap(isStartup) {
     await syncPotatoSites();
   });
   await getDeviceCapacityMB();
-  await setupAlarms();
   if (isStartup) {
     const stats = await getStats();
     stats.session = { ...EMPTY_COUNTERS, since: Date.now() };
@@ -1189,6 +1345,7 @@ const _wakeReady = (async () => {
   await rehydrateTabLastActive();
   await rehydrateStatsHot();
   await rehydrateBoostedTabs();
+  await rehydrateCalibration();
 })().catch(e => console.error('[Potatofy] wake-rehydrate failed', e));
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -1199,11 +1356,18 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === ALARM_IDLE)             checkIdleTabs();
-  else if (alarm.name === ALARM_PRESSURE)    checkMemoryPressure();
-  else if (alarm.name === ALARM_STATS_FLUSH) flushStatsHotToLocal();
-  else if (alarm.name === ALARM_TAB_PERSIST) persistTabLastActive();
-  else if (alarm.name === ALARM_DNR_POLL)    pollDNRMatches();
+  // QA-11 — each handler is async; attach .catch so a storage/API rejection
+  // surfaces as a log instead of an unhandled promise rejection (which can flag
+  // the worker as unstable). ALARM_TAB_PERSIST removed (PERF-12): tab activity is
+  // now persisted event-driven via schedulePersistTabLastActive().
+  let p;
+  if (alarm.name === ALARM_IDLE)             p = checkIdleTabs();
+  else if (alarm.name === ALARM_PRESSURE)    p = checkMemoryPressure();
+  else if (alarm.name === ALARM_STATS_FLUSH) p = Promise.all([flushStatsHotToLocal(), flushCalibration()]);
+  else if (alarm.name === ALARM_DNR_POLL)    p = pollDNRMatches();
+  if (p && typeof p.catch === 'function') {
+    p.catch(e => console.warn('[Potatofy] alarm', alarm.name, 'failed:', e));
+  }
 });
 
 chrome.tabs.onActivated.addListener((activeInfo) => {
@@ -1222,7 +1386,9 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   removeTabActivity(tabId);
-  clearBoostForTab(tabId);
+  // QA-11 — clearBoostForTab is async; catch so a teardown rejection doesn't
+  // become an unhandled promise rejection.
+  clearBoostForTab(tabId).catch(e => console.warn('[Potatofy] clearBoostForTab failed:', e));
   // H-2 — drop the per-tab rate-limit entries so neither Map can grow
   // unbounded across a long session of opening/closing tabs.
   statsRateByTab.delete(tabId);
@@ -1256,8 +1422,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === 'GET_SETTINGS') {
     (async () => {
-      const settings = await getSettings();
-      sendResponse({ settings });
+      try {
+        const settings = await getSettings();
+        sendResponse({ settings });
+      } catch (e) {
+        // QA-08 — the only handler that lacked a try/catch; a storage failure
+        // would leave the port open with no response until Chrome times it out.
+        console.warn('[Potatofy] GET_SETTINGS failed:', e);
+        sendResponse({ ok: false });
+      }
     })();
     return true;
   }
@@ -1284,9 +1457,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'STATS_INCREMENT' && msg.patch) {
-    // 1.1.3 — rate-limit per tab. Page scripts in MAIN-world content-script
-    // context can reach this handler; the limit caps abuse without breaking
-    // legitimate traffic from our own content script.
+    // Rate-limit per tab as defense-in-depth. The legitimate sender is our own
+    // (now ISOLATED-world) content script; the cap bounds abuse without breaking
+    // its normal debounced batches if the surface is ever reachable.
     const tabId = sender && sender.tab ? sender.tab.id : null;
     if (!statsRateAllow(tabId)) {
       sendResponse({ ok: true });
@@ -1298,30 +1471,32 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const v = Number(msg.patch[k]);
       if (Number.isFinite(v) && v > 0 && v <= MAX_INCREMENT) safe[k] = Math.floor(v);
     }
-    bufferIncrement(safe);
-    sendResponse({ ok: true });
-    return false;
+    // QUALITY-08 — await the buffer write before responding (return true keeps the
+    // port open). The old fire-and-forget let a follow-up GET_STATS flush the hot
+    // buffer to local storage before this increment had landed, dropping it.
+    (async () => {
+      try { await bufferIncrement(safe); } catch (e) {}
+      sendResponse({ ok: true });
+    })();
+    return true;
   }
 
   if (msg.type === 'GET_STATS') {
     (async () => {
       try {
+        await _wakeReady; // ensure calibHistory is rehydrated before computeCalibration()
         await flushStatsHotToLocal();
         const stats = await getStats();
         const cap = await getDeviceCapacityMB();
-        const storedCal = await chrome.storage.local.get('calibratedBandwidth');
-        const calibration = storedCal.calibratedBandwidth || null;
-        const storedHeap = await chrome.storage.local.get('heapMeasurements');
-        const heapMeasurements = storedHeap.heapMeasurements || null;
+        const calibration = computeCalibration();
         sendResponse({
           stats,
           weights: STATS_WEIGHTS,
           deviceCapacityMB: cap,
           calibration: calibration,
-          heapMeasurements: heapMeasurements,
           savings: {
-            session:  computeSavings(stats.session, calibration, heapMeasurements),
-            lifetime: computeSavings(stats.lifetime, calibration, heapMeasurements)
+            session:  computeSavings(stats.session, calibration),
+            lifetime: computeSavings(stats.lifetime, calibration)
           }
         });
       } catch (e) {
@@ -1396,9 +1571,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === 'CLEAR_BOOST') {
     (async () => {
-      const tabId = Number(msg.tabId);
-      if (Number.isFinite(tabId)) await clearBoostForTab(tabId);
-      sendResponse({ ok: true });
+      try {
+        const tabId = Number(msg.tabId);
+        if (Number.isFinite(tabId)) await clearBoostForTab(tabId);
+        sendResponse({ ok: true });
+      } catch (e) {
+        console.warn('[Potatofy] clearBoost threw:', e);
+        sendResponse({ ok: false });
+      }
     })();
     return true;
   }
@@ -1411,22 +1591,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === 'GET_SITE_KILLERS') {
     (async () => {
-      const killers = await getSiteKillers();
-      sendResponse({ ok: true, killers });
+      try {
+        const killers = await getSiteKillers();
+        sendResponse({ ok: true, killers });
+      } catch (e) {
+        console.warn('[Potatofy] getSiteKillers threw:', e);
+        sendResponse({ ok: false, killers: {} });
+      }
     })();
     return true;
   }
 
-  // 1.1.3: MAIN-world content scripts CAN reach chrome.runtime through
-  // window.chrome, so this handler is also reachable from page scripts. To
-  // prevent a whitelist-membership oracle (probe arbitrary hosts and observe
-  // the all-false response that whitelisted hosts produce), ignore msg.host
-  // when the sender is a content script and derive the host from sender.url
-  // instead. Page scripts can only ask about their own host — which they
-  // already know — so the oracle is closed.
+  // SEC-01: the content script now runs in the ISOLATED world, so OUR content
+  // script (not a page script) is the caller here, and sender.tab / sender.url are
+  // populated. Page scripts in the MAIN world cannot reach chrome.runtime, so this
+  // is no longer page-reachable. We still derive the host from sender.url (not
+  // msg.host) for tab senders: it's the authoritative source and closes a
+  // whitelist-membership oracle if the surface ever reopens (e.g. a future
+  // externally_connectable). Non-tab senders (the popup) legitimately pass msg.host.
   if (msg.type === 'GET_CONTENT_SETTINGS') {
-    // Page-reachable — apply the same per-tab rate limit as other page-reachable
-    // handlers so a tight loop can't sustain SW wake pressure on a Raspberry Pi.
+    // Keep the per-tab rate limit as cheap defense-in-depth so a tight
+    // settings-polling loop can't sustain SW wake pressure on a Raspberry Pi.
     const _gcsTabId = sender && sender.tab ? sender.tab.id : null;
     if (_gcsTabId !== null && !calibrationRateAllow(_gcsTabId)) {
       sendResponse({ ok: false });
@@ -1454,73 +1639,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'CALIBRATE_BANDWIDTH') {
     const tabId = sender && sender.tab ? sender.tab.id : null;
     if (!calibrationRateAllow(tabId)) { sendResponse({ ok: true }); return false; }
-    (async () => {
-      try {
-        if (!isValidCalibrationData(msg.data)) return;
-        const stored = await chrome.storage.local.get('calibrationHistory');
-        const history = Array.isArray(stored.calibrationHistory) ? stored.calibrationHistory : [];
-
-        history.push({
-          trackers: msg.data.trackers,
-          fonts:    msg.data.fonts,
-          scripts:  msg.data.scripts,
-          images:   msg.data.images,
-        });
-        if (history.length > 100) history.shift();
-
-        const aggregated = {
-          trackers: median(history.map(h => h.trackers).filter(x => x > 0)),
-          fonts: median(history.map(h => h.fonts).filter(x => x > 0)),
-          scripts: median(history.map(h => h.scripts).filter(x => x > 0)),
-          images: median(history.map(h => h.images).filter(x => x > 0)),
-          lastUpdated: Date.now()
-        };
-
-        await chrome.storage.local.set({
-          calibrationHistory: history,
-          calibratedBandwidth: aggregated
-        });
-      } catch (e) {
-        console.warn('[Potatofy] Bandwidth calibration failed:', e);
-      }
-    })();
+    // PERF-10 / SEC-03 — record into the in-memory buffer only; no per-message
+    // storage read-modify-write. Persisted on the periodic stats-flush alarm.
+    // Await _wakeReady so we don't append to a not-yet-rehydrated buffer.
+    if (isValidCalibrationData(msg.data)) {
+      (async () => { await _wakeReady; recordCalibration(msg.data); })();
+    }
+    sendResponse({ ok: true });
     return false;
   }
 
-  // ========== Phase 3: Heap Memory Measurement ==========
-  if (msg.type === 'HEAP_MEASUREMENT') {
-    const tabId = sender && sender.tab ? sender.tab.id : null;
-    if (!calibrationRateAllow(tabId)) { sendResponse({ ok: true }); return false; }
-    (async () => {
-      try {
-        const feature = msg.feature;
-        const freed = msg.freed;
-
-        if (!VALID_HEAP_FEATURES.has(feature) || !Number.isFinite(freed) || freed <= 0 || freed > MAX_HEAP_FREED_BYTES) {
-          return;
-        }
-
-        const stored = await chrome.storage.local.get('heapMeasurements');
-        const measurements = stored.heapMeasurements || {};
-
-        if (!Array.isArray(measurements[feature])) measurements[feature] = [];
-        measurements[feature].push({
-          freed: freed,
-          timestamp: Date.now()
-        });
-
-        // Keep rolling window of last 100 measurements per feature.
-        if (measurements[feature].length > 100) {
-          measurements[feature] = measurements[feature].slice(-100);
-        }
-
-        await chrome.storage.local.set({ heapMeasurements: measurements });
-      } catch (e) {
-        console.warn('[Potatofy] Heap measurement storage failed:', e);
-      }
-    })();
-    return false;
-  }
+  // HEAP_MEASUREMENT removed (PERF-01): the performance.memory heap-delta path was
+  // statistically unsound and is gone. The content script no longer sends it.
 });
 
 // When settings change (popup toggle, sync, direct storage write), push the
