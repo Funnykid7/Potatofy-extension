@@ -1,11 +1,9 @@
 import { DEFAULT_SETTINGS, ALLOWED_THRESHOLDS, ALLOWED_PRESSURE_MB } from '../lib/defaults.js';
+import { formatBytes, formatMs, normalizeHost } from '../lib/formatters.js';
 
 // 1.1.2: detect packaged builds. Diagnostics suite is dev-only — gets hidden
 // when running under a Web Store install where update_url is set.
 const IS_PACKAGED = !!chrome.runtime.getManifest().update_url;
-
-// E3: shared formatters loaded by ../lib/formatters.js classic script.
-const { formatBytes, formatMs, normalizeHost } = window.PotatofyFmt;
 
 // 1.1.2 A3 — used by the whitelist cap warning.
 const MAX_WHITELIST = 199;
@@ -329,7 +327,7 @@ function bindSectionPersist() {
 }
 
 // ---------- Stats (P4: push-based via storage.onChanged) ----------
-// formatBytes / formatMs come from window.PotatofyFmt — shared with tests.js.
+// formatBytes / formatMs imported from ../lib/formatters.js (shared with tests.js).
 
 async function refreshStats() {
   try {
@@ -347,7 +345,10 @@ async function refreshStats() {
     const ramDisplayed = Math.min(savings.ramBytes, capBytes);
     const isCapped = ramDisplayed < savings.ramBytes;
 
-    const hasMeasuredData = (counters.realRamFreed || 0) > 0 || (savings.breakdown?.measured?.ramBytes ?? 0) > 0;
+    // "Measured" RAM = the real tab-discard before/after measurement (realRamFreed).
+    // When present the headline isn't purely heuristic, so drop the "~" estimate
+    // prefix. (The former heap-measurement breakdown.measured branch was removed.)
+    const hasMeasuredData = (counters.realRamFreed || 0) > 0 || (savings.breakdown?.real?.ramBytes ?? 0) > 0;
     const ramPrefix = hasMeasuredData ? '' : (isCapped ? '≥' : '~');
     const ramDisplay = ramPrefix + formatBytes(ramDisplayed);
 
@@ -555,7 +556,7 @@ function bindStatsControls() {
 
 function bindStorageListener() {
   chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName === 'local' && (changes.stats || changes.heapMeasurements || changes.calibratedBandwidth)) {
+    if (areaName === 'local' && (changes.stats || changes.calibratedBandwidth)) {
       refreshStats();
     }
     if (areaName === 'local' && changes.settings) {

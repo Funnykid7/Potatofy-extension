@@ -1,8 +1,13 @@
 (function () {
-  // Saved originals — must be captured before any page script can override them.
+  // SEC-01: this script runs in the ISOLATED world (see manifest content_scripts).
+  // It has chrome.runtime and owns all messaging, DOM features, observers, and
+  // calibration. The page-timer throttle — the one feature that must override
+  // window.setTimeout in the page's MAIN world — lives in main-throttle.js and is
+  // driven from here via postThrottleState() over window.postMessage.
+  //
+  // These bindings are the ISOLATED world's own globals; the page cannot reach or
+  // override them, so they stay native for our internal use regardless of the page.
   const _setTimeout = window.setTimeout.bind(window);
-  const _requestAnimationFrame = (window.requestAnimationFrame || function () { return 0; }).bind(window);
-  const _cancelAnimationFrame = (window.cancelAnimationFrame || function () {}).bind(window);
   const _requestIdleCallback = (window.requestIdleCallback || function (cb) { return _setTimeout(cb, 1); }).bind(window);
   const _setInterval = window.setInterval.bind(window);
 
@@ -79,14 +84,13 @@
     siteKillersEnabled: false,
     siteKillers: []
   };
-  let throttleActive = false;
   let visibilityListenerAttached = false;
 
   // ---------- Stats bridge (debounced) ----------
   // 1.1.2: stats go directly to the service worker via chrome.runtime. The
   // old window.dispatchEvent('__potatofy_stat') path was observable by page
-  // scripts and is removed. chrome.runtime in MAIN-world content scripts is
-  // closure-scoped and not reachable from page-script JS.
+  // scripts and is removed. Now that this script is in the ISOLATED world,
+  // chrome.runtime lives in a world the page's JS cannot reach.
 
   const statBuffer = Object.create(null);
   let statFlushTimer = null;
@@ -140,92 +144,23 @@
     return document.visibilityState === 'hidden';
   }
 
-  // ---------- Throttle (B7 + A7 hardening) ----------
-  // Only one-shot work is suppressed on hidden tabs: setTimeout and rAF.
-  // C-1 — setInterval is intentionally NOT shadowed. Suppressing a repeating
-  // timer permanently dropped it (there was no replay path), which silently
-  // broke background polling loops (webmail refresh, chat heartbeats, SPA
-  // pollers started while the tab was hidden). Chrome already throttles
-  // background interval timers to ~1/minute on its own, so the marginal extra
-  // savings weren't worth the correctness loss.
-  //
-  // C-2 — suppressed rAF IDs are NEGATIVE descending integers. Real
-  // requestAnimationFrame IDs are positive longs starting at 1, so a negative
-  // ID can never collide with a real one; shadowedCancelAnimationFrame can
-  // therefore safely forward unknown IDs to the native cancel.
-  //
-  // 1.1.3 — suppressed setTimeout IDs still come from a randomised high base
-  // so the old fixed 0x7FFF0000 sentinel (a trivial extension fingerprint /
-  // visibility oracle) is gone. The base lives in the upper 30 bits, well
-  // above any realistic real timer ID, but unpredictable per page load.
-  const SENTINEL_BASE = ((Math.random() * 0x3FFFFFFF) | 0) + 0x40000000;
-  let rafCounter = 0;               // decremented → negative, native-disjoint
-  let suppressedTimerCounter = SENTINEL_BASE;
-  const pendingRaf = new Map();
-  // N-4 — cap so a tight rAF loop on a long-hidden tab can't grow the Map
-  // without bound (and can't cause a giant drain burst on un-hide).
-  const MAX_PENDING_RAF = 240;
-
-  function shadowedSetTimeout(fn, delay, ...args) {
-    if (isHidden() && settings.jsThrottleEnabled) return ++suppressedTimerCounter;
-    return _setTimeout(fn, delay, ...args);
-  }
-  function shadowedRequestAnimationFrame(cb) {
-    if (isHidden() && settings.jsThrottleEnabled) {
-      const id = --rafCounter;
-      pendingRaf.set(id, cb);
-      if (pendingRaf.size > MAX_PENDING_RAF) {
-        // Drop the oldest queued callback (Map preserves insertion order).
-        const oldest = pendingRaf.keys().next().value;
-        pendingRaf.delete(oldest);
-      }
-      return id;
-    }
-    return _requestAnimationFrame(cb);
-  }
-  function shadowedCancelAnimationFrame(id) {
-    if (pendingRaf.delete(id)) return;
-    _cancelAnimationFrame(id);
-  }
-
-  function drainPendingRaf() {
-    if (pendingRaf.size === 0) return;
-    const snapshot = Array.from(pendingRaf.entries());
-    pendingRaf.clear();
-    for (const [, cb] of snapshot) {
-      try { _requestAnimationFrame(cb); } catch (e) {}
-    }
-  }
-
-  function applyThrottle() {
-    if (throttleActive) return;
-    throttleActive = true;
-    window.setTimeout = shadowedSetTimeout;
-    window.requestAnimationFrame = shadowedRequestAnimationFrame;
-    window.cancelAnimationFrame = shadowedCancelAnimationFrame;
-  }
-
-  function restoreOriginals() {
-    if (!throttleActive) return;
-    throttleActive = false;
-    window.setTimeout = _setTimeout;
-    window.requestAnimationFrame = _requestAnimationFrame;
-    window.cancelAnimationFrame = _cancelAnimationFrame;
-    // H-1 — only replay queued rAF callbacks when the tab is actually visible.
-    // Draining into a still-hidden tab schedules them onto the native rAF,
-    // which Chrome has suspended, so they'd be lost. Leave them queued; the
-    // visibilitychange handler drains them on the real transition to visible.
-    if (!isHidden()) drainPendingRaf();
+  // ---------- Throttle bridge (SEC-01) ----------
+  // The real window.setTimeout / requestAnimationFrame override lives in
+  // main-throttle.js, which runs in the page's MAIN world (a content script can
+  // only override the page's own timers from that world). This ISOLATED script
+  // cannot reach the page's timers, so it just relays the jsThrottleEnabled flag.
+  // The MAIN snippet reads document.visibilityState itself and owns the
+  // queue/drain logic, so there is no throttle state to manage here.
+  const THROTTLE_MSG_TAG = '__ptfy_thr';
+  function postThrottleState() {
+    try {
+      window.postMessage({ __ptfy: THROTTLE_MSG_TAG, jsThrottleEnabled: settings.jsThrottleEnabled }, location.origin);
+    } catch (e) {}
   }
 
   function handleVisibilityChange() {
-    if (settings.jsThrottleEnabled) {
-      if (isHidden()) applyThrottle(); else restoreOriginals();
-    }
-    // H-1 — always replay any rAF callbacks that were queued while hidden once
-    // the tab is visible again, even if throttle was disabled in the meantime
-    // (in which case restoreOriginals already ran and left them queued).
-    if (!isHidden()) drainPendingRaf();
+    // Throttle is owned by main-throttle.js (it has its own visibilitychange
+    // listener); nothing to do for it here.
     if (settings.videoPauseEnabled) {
       if (isHidden()) pauseAllVideos(document);
       else restoreVideoPlayability(document);
@@ -307,7 +242,14 @@
       try {
         pausePreloadedVideos.delete(n);
         maybeRestorePreload(n);     // honors a still-active videoPreloadNone
-        n[POTATO_PAUSED_KEY] = false;
+        // QA-12 — actually resume playback for videos WE paused on tab-hide.
+        // The old code only cleared the flag, so a video paused when the tab was
+        // backgrounded stayed paused forever after the user returned.
+        if (n[POTATO_PAUSED_KEY]) {
+          n[POTATO_PAUSED_KEY] = false;
+          const p = n.play();
+          if (p && typeof p.catch === 'function') p.catch(() => {});
+        }
       } catch (e) {}
     }
   }
@@ -349,21 +291,18 @@
   let killStyleEl = null;
   let pageHadAnimations = false;
 
+  // PERF-07 — detect animations via the Web Animations API only. The old
+  // fallback walked every stylesheet's cssRules looking for @keyframes, which
+  // blocked the main thread on CSS-heavy sites — and it existed purely to decide
+  // whether to count a single animationsKilled stat. document.getAnimations() is
+  // the cheap standard signal (Chrome 120+); the stylesheet scan is dropped.
+  // Trade-off: animations that haven't started at sample time may be undercounted
+  // — acceptable, since the kill style is injected regardless and the RAM weight
+  // for animations is now ~token (CSS animations don't allocate JS heap).
   function pageHasAnimations() {
     try {
       if (typeof document.getAnimations === 'function' && document.getAnimations().length > 0) {
         return true;
-      }
-    } catch (e) {}
-    try {
-      const sheets = document.styleSheets;
-      for (const sheet of sheets) {
-        let rules;
-        try { rules = sheet.cssRules; } catch (e) { continue; } // cross-origin
-        if (!rules) continue;
-        for (const rule of rules) {
-          if (rule.type === CSSRule.KEYFRAMES_RULE) return true;
-        }
       }
     } catch (e) {}
     return false;
@@ -444,7 +383,17 @@
       if (UNIVERSAL_COMBINATOR_RE.test(t)) return false;
       // SEC-1 (d): leading document-root token (`body > div`, `html .foo`).
       if (BLOCKED_LEADING_RE.test(t)) return false;
-      try { document.querySelector(s); return true; } catch (e) { return false; }
+      // PERF-08 — validate selector SYNTAX without traversing the DOM.
+      // CSS.supports('selector(...)') uses the CSS parser only (no querySelector
+      // walk), so a long site-killers list doesn't trigger N full-document scans
+      // at startup. Fall back to querySelector if CSS.supports is unavailable.
+      try {
+        if (window.CSS && typeof CSS.supports === 'function') {
+          return CSS.supports('selector(' + s + ')');
+        }
+        document.querySelector(s);
+        return true;
+      } catch (e) { return false; }
     });
     if (selectors.length === 0) return false;
     const css = selectors.join(',\n') + ' { display: none !important; }';
@@ -611,35 +560,45 @@
         relevant = true;
         const tag = node.tagName;
 
+        // PERF-06 — only descend into added subtrees that actually have element
+        // children. A leaf node (<span>, a text wrapper) has children.length === 0,
+        // so querySelectorAll would scan for nothing; the guard skips that cost on
+        // highly dynamic pages (React re-renders, infinite scroll).
+        const hasKids = node.children && node.children.length > 0 && node.querySelectorAll;
+
         if (snap.imageLazyEnabled || snap.imageLowQualityEnabled) {
           if (tag === 'IMG' || tag === 'IFRAME') {
             if (lazifyImage(node)) reportStat('imagesLazied', 1);
-          } else if (node.querySelectorAll) {
+          } else if (hasKids) {
             applyImageLazyAll(node);
           }
         }
         if (snap.prefetchStripEnabled) {
           if (tag === 'LINK') {
             if (stripPrefetchLink(node)) reportStat('prefetchStripped', 1);
-          } else if (node.querySelectorAll) {
+          } else if (hasKids) {
             applyPrefetchStripAll(node);
           }
         }
-        if (snap.videoPauseEnabled && snap.hidden) {
+        // QA-13 — read live isHidden() here, NOT the snapshotted snap.hidden.
+        // This callback runs in a deferred requestIdleCallback tick that can fire
+        // AFTER the tab became visible again; the stale snapshot would otherwise
+        // pause freshly-inserted videos on a now-foreground tab.
+        if (snap.videoPauseEnabled && isHidden()) {
           if (tag === 'VIDEO') {
             if (pauseVideoNode(node)) reportStat('videosPaused', 1);
-          } else if (node.querySelectorAll) {
+          } else if (hasKids) {
             pauseAllVideos(node);
           }
         }
         if (snap.videoPreloadNoneEnabled) {
           if (tag === 'VIDEO') applyVideoPreloadNone(node);
-          else if (node.querySelectorAll) applyVideoPreloadNoneAll(node);
+          else if (hasKids) applyVideoPreloadNoneAll(node);
         }
         if (snap.autoplayKillEnabled) {
           if (tag === 'VIDEO' || tag === 'AUDIO') {
             if (killAutoplay(node)) reportStat('autoplayKilled', 1);
-          } else if (node.querySelectorAll) {
+          } else if (hasKids) {
             killAutoplayAll(node);
           }
         }
@@ -658,15 +617,16 @@
     if (!target) return;
     observerIdleCount = 0;
     observer = new MutationObserver((mutations) => {
-      // Snapshot feature flags + visibility now, before the deferred tick.
+      // Snapshot feature flags now, before the deferred tick (H-3). Visibility is
+      // intentionally NOT snapshotted — processMutations reads isHidden() live so a
+      // tick that fires after the tab is shown again can't act on stale state (QA-13).
       const snap = {
         imageLazyEnabled:        settings.imageLazyEnabled,
         imageLowQualityEnabled:  settings.imageLowQualityEnabled,
         prefetchStripEnabled:    settings.prefetchStripEnabled,
         videoPauseEnabled:       settings.videoPauseEnabled,
         videoPreloadNoneEnabled: settings.videoPreloadNoneEnabled,
-        autoplayKillEnabled:     settings.autoplayKillEnabled,
-        hidden:                  isHidden()
+        autoplayKillEnabled:     settings.autoplayKillEnabled
       };
       _requestIdleCallback(() => processMutations(mutations, snap), { timeout: 500 });
     });
@@ -701,8 +661,13 @@
   // ---------- Apply / sync feature flags ----------
 
   function applyAll() {
+    // Keep main-throttle.js (MAIN world) in sync with the current setting on
+    // every settings change, including the teardown path below.
+    postThrottleState();
+
     if (!anyFeatureEnabled()) {
-      restoreOriginals();
+      restoreImageQuality();
+      restoreVideoPlayability(document);
       removeAnimationKill();
       removeSiteKillers();
       stopObserver();
@@ -710,58 +675,34 @@
     }
     ensureVisibilityListener();
 
-    if (settings.animationKillEnabled) {
-      const _hb = performance.memory ? performance.memory.usedJSHeapSize : 0;
-      if (applyAnimationKill()) measureHeapDelta('animationsKilled', _hb);
-    } else removeAnimationKill();
-    if (settings.siteKillersEnabled && settings.siteKillers.length > 0) {
-      const _hb = performance.memory ? performance.memory.usedJSHeapSize : 0;
-      if (applySiteKillers()) measureHeapDelta('siteKillerHits', _hb);
-    } else removeSiteKillers();
+    if (settings.animationKillEnabled) applyAnimationKill();
+    else removeAnimationKill();
+    if (settings.siteKillersEnabled && settings.siteKillers.length > 0) applySiteKillers();
+    else removeSiteKillers();
 
     // L-3 — only walk the document when an image-modifying feature is actually
     // on. restoreImageQuality is a cheap no-op when the WeakMap is empty, so we
     // avoid the apply-then-immediately-restore churn that ran every applyAll.
-    if (settings.imageLazyEnabled || settings.imageLowQualityEnabled) {
-      const _hb = performance.memory ? performance.memory.usedJSHeapSize : 0;
-      if (applyImageLazyAll(document)) measureHeapDelta('imagesLazied', _hb);
-    }
+    if (settings.imageLazyEnabled || settings.imageLowQualityEnabled) applyImageLazyAll(document);
     if (!settings.imageLowQualityEnabled) restoreImageQuality();
     if (settings.prefetchStripEnabled) applyPrefetchStripAll(document);
-    if (settings.autoplayKillEnabled) {
-      const _hb = performance.memory ? performance.memory.usedJSHeapSize : 0;
-      if (killAutoplayAll(document)) measureHeapDelta('autoplayKilled', _hb);
-    }
-    if (settings.videoPreloadNoneEnabled) {
-      const _hb = performance.memory ? performance.memory.usedJSHeapSize : 0;
-      if (applyVideoPreloadNoneAll(document)) measureHeapDelta('videosPreloadNoned', _hb);
-    }
-    if (settings.videoPauseEnabled && isHidden()) {
-      const _hb = performance.memory ? performance.memory.usedJSHeapSize : 0;
-      if (pauseAllVideos(document)) measureHeapDelta('videosPaused', _hb);
-    }
+    if (settings.autoplayKillEnabled) killAutoplayAll(document);
+    if (settings.videoPreloadNoneEnabled) applyVideoPreloadNoneAll(document);
+    if (settings.videoPauseEnabled && isHidden()) pauseAllVideos(document);
 
     if (anyContentFeatureEnabled()) startObserver(); else stopObserver();
-
-    if (settings.jsThrottleEnabled) {
-      if (isHidden()) applyThrottle();
-    } else {
-      restoreOriginals();
-    }
   }
 
   function ingestDetail(detail) {
     if (!detail) return;
-    settings.jsThrottleEnabled       = !!detail.jsThrottleEnabled;
-    settings.imageLazyEnabled        = !!detail.imageLazyEnabled;
-    settings.imageLowQualityEnabled  = !!detail.imageLowQualityEnabled;
-    settings.animationKillEnabled    = !!detail.animationKillEnabled;
-    settings.autoplayKillEnabled     = !!detail.autoplayKillEnabled;
-    settings.prefetchStripEnabled    = !!detail.prefetchStripEnabled;
-    settings.videoPauseEnabled       = !!detail.videoPauseEnabled;
-    settings.videoPreloadNoneEnabled = !!detail.videoPreloadNoneEnabled;
-    settings.siteKillersEnabled      = !!detail.siteKillersEnabled;
-    settings.siteKillers             = Array.isArray(detail.siteKillers) ? detail.siteKillers : [];
+    // QUALITY-05 — derive the boolean flags from the `settings` object's own keys,
+    // so adding a content toggle only means adding it to the `settings` initializer
+    // (and the gate helpers). siteKillers is the lone non-boolean field.
+    for (const k of Object.keys(settings)) {
+      if (k === 'siteKillers') continue;
+      settings[k] = !!detail[k];
+    }
+    settings.siteKillers = Array.isArray(detail.siteKillers) ? detail.siteKillers : [];
   }
 
   // ---------- chrome.runtime channel (1.1.2 — replaces CustomEvent bus) ----------
@@ -821,7 +762,7 @@
         }
       });
 
-      observer.observe({ entryTypes: ['resource'], buffered: true });
+      observer.observe({ type: 'resource', buffered: true });
     } catch (e) {
       // PerformanceObserver not available or failed
     }
@@ -871,40 +812,11 @@
     _setInterval(sendCalibrationData, 30000); // Send every 30 seconds
   }
 
-  // ========== Phase 3: Heap Memory Measurement ==========
-  // Measure actual JS heap freed by content features (non-blocking, async).
-  //
-  // Strategy: Phase 3 (heap) measures on-demand after each feature application
-  // with delays for GC completion. Differs from Phase 2 (bandwidth) which uses
-  // fixed 30s interval across page loads. Asymmetry is intentional: heap is
-  // feature-specific and best measured immediately; bandwidth aggregates across
-  // multiple loads and benefits from longer intervals.
-  //
-  // Coverage: Measured features are animation kill, video pause/preload, autoplay,
-  // image lazy, and site killers. Unmeasured: prefetch (no heap delta), blocked
-  // requests (DNR rules, not content-driven), 3rd-party resources (DNR rules).
-
-  // heapBefore must be captured synchronously before the feature runs; this
-  // function then waits 200ms for GC before taking the after-snapshot.
-  // IS_TOP_FRAME guard deduplicates across same-origin iframes (all_frames: true).
-  // Chrome-only non-standard API; guarded below — no-ops on other browsers.
-  function measureHeapDelta(featureName, heapBefore) {
-    if (!performance.memory || !IS_TOP_FRAME || !heapBefore) return;
-
-    _setTimeout(() => {
-      try {
-        const heapAfter = performance.memory.usedJSHeapSize;
-        const freed = Math.max(0, heapBefore - heapAfter);
-        if (freed > 0) {
-          chrome.runtime.sendMessage({
-            type: 'HEAP_MEASUREMENT',
-            feature: featureName,
-            freed: freed
-          }).catch(() => {});
-        }
-      } catch (e) {}
-    }, 200);
-  }
+  // PERF-01 — the former Phase 3 heap-measurement path (performance.memory
+  // deltas) was removed. performance.memory is deprecated, Chrome-only, and
+  // bucketed for privacy, and the Math.max(0, before - after) delta misattributed
+  // unrelated GC drops to features, inflating the RAM-saved figure. Savings now
+  // use the real tab-discard measurement plus conservative heuristic weights only.
 
   // N-1 — guard the call site so a synchronous throw (e.g. chrome.runtime
   // unavailable mid-load) can't surface as an unhandled rejection.

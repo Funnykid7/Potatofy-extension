@@ -38,7 +38,7 @@
   <div class="prose">
     <p class="eyebrow">Legal</p>
     <h1>Privacy Policy</h1>
-    <p class="updated">Last updated: May 2026 · Version 1.1.4</p>
+    <p class="updated">Last updated: June 2026 · Version 1.1.5</p>
 
     <div class="callout">
       <p><strong>Short version:</strong> Potatofy collects nothing by default. No analytics, no telemetry, no servers. The only way any data leaves your device is if you explicitly opt into Chrome's built-in sync — which you can turn off at any time.</p>
@@ -48,13 +48,12 @@
     <p><strong>Nothing, by default.</strong> The extension operates entirely on your device. It reads your browser's tab state, memory usage, and the URLs of pages you visit — but only locally, to decide which optimisations to apply. None of this is stored beyond the current session or transmitted anywhere.</p>
 
     <h2>Local storage only</h2>
-    <p>Potatofy stores six things in <code>chrome.storage.local</code> on your device:</p>
+    <p>Potatofy stores five things in <code>chrome.storage.local</code> on your device:</p>
     <ul>
       <li><strong><code>settings</code></strong> — your feature toggle states and numeric thresholds (e.g. idle timeout, memory pressure level). No browsing history, no URLs, no page content.</li>
       <li><strong><code>stats</code></strong> — estimated counts of blocked requests, discarded tabs, and similar aggregate numbers used to show you the popup's savings display. These are heuristic estimates, not a log of your activity.</li>
       <li><strong><code>calibrationHistory</code></strong> — a rolling window (up to 100 entries) of median resource sizes observed by the PerformanceObserver on pages you visit, used to calibrate bandwidth-saved estimates. Contains byte sizes only — no URLs, no page content.</li>
       <li><strong><code>calibratedBandwidth</code></strong> — the current aggregate median derived from <code>calibrationHistory</code>, used as a per-category bandwidth weight in the savings display.</li>
-      <li><strong><code>heapMeasurements</code></strong> — per-feature arrays of JS heap delta measurements (bytes freed) used to replace heuristic RAM estimates with real measured values. Contains byte counts and measurement timestamps (millisecond epoch integers) — no URLs, no page content, no personal data.</li>
       <li><strong><code>privacyAccepted</code></strong> — a single boolean recording that you have accepted this privacy policy. Required before the popup activates.</li>
     </ul>
     <p>This data never leaves your device unless you opt into sync (see below).</p>
@@ -126,7 +125,7 @@
         <span>View on GitHub</span>
       </a>
     </div>
-    <p class="foot-meta">GPLv3 licensed. No trackers on this page either. v1.1.4</p>
+    <p class="foot-meta">GPLv3 licensed. No trackers on this page either. v1.1.5</p>
   </div>
 </footer>
 

@@ -36,3 +36,7 @@ without*.json
 # Claude Code session data and audit files
 .claude/
 flaws*.md
+ORIGINAL_REQUEST.md
+potatofy_audit_report.md
+PROJECT.md
+.agents/
