@@ -66,11 +66,19 @@
   // Bare attribute-presence ANYWHERE in the selector (tag-prefixed or not):
   // matches [attr] with no operator; `[^\]=~|^$*]*` = no `]`, `=`, or operator prefix chars.
   const BARE_ATTR_RE = /\[[^\]=~|^$*]*\]/;
-  // Universal selector used as a combinator target (e.g. `div > *`, `ul *`):
-  const UNIVERSAL_COMBINATOR_RE = /(?:^|[>+~\s])\s*\*(?:[^=\w\-]|$)/;
-  // Selectors whose LEADING token is a document-root element — targets like
-  // `body > div` or `html .foo` select essentially the entire page structure:
-  const BLOCKED_LEADING_RE = /^(?:body|html|head|:root)\b/i;
+  // Universal selector used as an UNQUALIFIED combinator target (e.g.
+  // `div > *`, `ul *`) — rejects only when `*` stands alone (followed by a
+  // combinator, comma, whitespace, or end of string). A `*` immediately
+  // qualified by `.`,`#`,`:`, or `[` (e.g. `div > *[data-ad]`) narrows the
+  // match and is left to the other checks (BARE_ATTR_RE etc.) to validate.
+  const UNIVERSAL_COMBINATOR_RE = /(?:^|[>+~\s])\s*\*(?:[\s>+~,]|$)/;
+  // Selectors where body/html/head/:root is the SOLE TARGET being qualified
+  // (e.g. `body`, `body.ad-banner`, `html:not(...)`) — these select
+  // essentially the entire page. A selector that uses one of these tokens as
+  // a DESCENDANT ROOT instead (followed by whitespace or a combinator, e.g.
+  // `body .ad-container`) targets a specific descendant, not the page
+  // itself, and is left alone.
+  const BLOCKED_LEADING_RE = /^(?:body|html|head|:root)(?:$|[.#:\[])/i;
 
   const settings = {
     jsThrottleEnabled: false,
@@ -119,6 +127,22 @@
     }, 1000);
   }
 
+  // The 1s debounce above loses whatever is buffered if the page navigates
+  // away or the tab closes before it fires — flush synchronously on pagehide
+  // so short-lived pages don't undercount savings.
+  window.addEventListener('pagehide', () => {
+    if (!IS_TOP_FRAME) return;
+    if (statFlushTimer) { clearTimeout(statFlushTimer); statFlushTimer = null; }
+    const patch = {};
+    for (const k of Object.keys(statBuffer)) {
+      const v = statBuffer[k];
+      statBuffer[k] = 0;
+      if (Number.isFinite(v) && v > 0) patch[k] = Math.min(Math.floor(v), MAX_INCREMENT);
+    }
+    if (Object.keys(patch).length === 0) return;
+    chrome.runtime.sendMessage({ type: 'STATS_INCREMENT', patch }).catch(() => {});
+  });
+
   // ---------- Feature gates ----------
   // anyFeatureEnabled() covers ALL content-layer features. Used by applyAll()
   // to decide whether to tear everything down. Includes one-shot features
@@ -154,7 +178,14 @@
   const THROTTLE_MSG_TAG = '__ptfy_thr';
   function postThrottleState() {
     try {
-      window.postMessage({ __ptfy: THROTTLE_MSG_TAG, jsThrottleEnabled: settings.jsThrottleEnabled }, location.origin);
+      // location.origin is the literal string "null" in sandboxed iframes
+      // (sandbox without allow-same-origin) and a unique opaque value on
+      // file:// pages — postMessage with either as the target origin fails
+      // silently, so the MAIN-world throttle snippet never gets the enable
+      // signal. The payload carries no sensitive data, so '*' is safe here.
+      let origin = location.origin;
+      if (!origin || origin === 'null' || origin.indexOf('file://') === 0) origin = '*';
+      window.postMessage({ __ptfy: THROTTLE_MSG_TAG, jsThrottleEnabled: settings.jsThrottleEnabled }, origin);
     } catch (e) {}
   }
 
@@ -227,17 +258,17 @@
   }
 
   function pauseAllVideos(root) {
-    if (!root || !root.querySelectorAll) return false;
+    if (!root) return false;
     let count = 0;
-    const nodes = root.querySelectorAll('video');
+    const nodes = deepQueryAll(root, 'video');
     for (const n of nodes) if (pauseVideoNode(n)) count++;
     if (count) reportStat('videosPaused', count);
     return count > 0;
   }
 
   function restoreVideoPlayability(root) {
-    if (!root || !root.querySelectorAll) return;
-    const nodes = root.querySelectorAll('video');
+    if (!root) return;
+    const nodes = deepQueryAll(root, 'video');
     for (const n of nodes) {
       try {
         pausePreloadedVideos.delete(n);
@@ -275,15 +306,31 @@
   }
 
   function applyVideoPreloadNoneAll(root) {
-    if (!root || !root.querySelectorAll) return false;
+    if (!root) return false;
     let count = 0;
-    const nodes = root.querySelectorAll('video');
+    const nodes = deepQueryAll(root, 'video');
     for (const n of nodes) if (applyVideoPreloadNone(n)) count++;
     // 1.1.2: dedicated counter so the popup can attribute savings to the
     // correct toggle. Previously folded into videosPaused which misled users
     // about which feature was contributing.
     if (count) reportStat('videosPreloadNoned', count);
     return count > 0;
+  }
+
+  // Restore preload for videos suppressed by videoPreloadNoneEnabled. Needed
+  // as its own per-toggle path (mirroring restoreVideoPlayability for
+  // videoPauseEnabled) — without it, toggling this feature off mid-session
+  // while another feature stays enabled left preload="none" stuck until the
+  // page was reloaded or the video happened to play (firing the one-shot
+  // onPlay listener from applyVideoPreloadNone).
+  function restoreVideoPreloadNone(root) {
+    if (!root) return;
+    const nodes = deepQueryAll(root, 'video');
+    for (const n of nodes) {
+      if (!preloadNonedVideos.has(n)) continue;
+      preloadNonedVideos.delete(n);
+      maybeRestorePreload(n); // honors a still-active videoPause
+    }
   }
 
   // ---------- Animation killer ----------
@@ -325,6 +372,11 @@
     `;
     const insert = () => {
       if (killStyleEl) return;
+      // The feature may have been toggled off again before DOMContentLoaded
+      // fired for this deferred injection — re-check the live flag so a
+      // rapid toggle-off/on right at page load doesn't still result in a
+      // permanent injection.
+      if (!settings.animationKillEnabled) return;
       // M-6 — sample whether the page actually had animations BEFORE injecting
       // the kill style. The kill style only zeroes durations; it doesn't remove
       // @keyframes rules, so pageHasAnimations() would return true on virtually
@@ -361,7 +413,7 @@
   let siteKillerStyleEl = null;
 
   function applySiteKillers() {
-    if (siteKillerStyleEl || !settings.siteKillersEnabled || settings.siteKillers.length === 0) return false;
+    if (!settings.siteKillersEnabled || settings.siteKillers.length === 0) return false;
     // 1.1.2 (B6): validate each selector in isolation so one bad pattern can't
     // poison the entire stylesheet. querySelector throws on syntax errors but
     // is fast and uses the real CSS engine.
@@ -374,15 +426,33 @@
       const t = s.trim();
       if (BLOCKED_SELECTORS.has(t.toLowerCase())) return false;
       if (BROAD_SELECTOR_RE.test(t)) return false;
+      // Strip quoted string literals before the anywhere/comma checks below —
+      // otherwise content INSIDE an attribute value's quotes (e.g. the
+      // literal "[Ad]" in `div[aria-label="[Ad]"]`, or "300,250" in
+      // `div[data-sizes="300,250"]`) gets misread as a bare-attribute
+      // presence selector or a compound-selector comma.
+      const stripped = t.replace(/"[^"]*"|'[^']*'/g, '');
       // SEC-1 (a): comma = compound selector; each entry must be a single rule
-      // so `"div.ad, body"` can't smuggle a blocked token past per-entry checks.
-      if (t.includes(',')) return false;
+      // so `"div.ad, body"` can't smuggle a blocked token past per-entry
+      // checks. A comma nested inside parentheses (e.g. `:is(.a, .b)`) is a
+      // single functional pseudo-class argument list, not a top-level
+      // selector separator, so only a comma OUTSIDE any parens counts.
+      let parenDepth = 0, hasTopLevelComma = false;
+      for (const ch of stripped) {
+        if (ch === '(') parenDepth++;
+        else if (ch === ')') parenDepth = Math.max(0, parenDepth - 1);
+        else if (ch === ',' && parenDepth === 0) { hasTopLevelComma = true; break; }
+      }
+      if (hasTopLevelComma) return false;
       // SEC-1 (b): bare [attr] presence anywhere (catches tag-prefixed forms).
-      if (BARE_ATTR_RE.test(t)) return false;
-      // SEC-1 (c): universal selector as a combinator target (`div > *`, `ul *`).
-      if (UNIVERSAL_COMBINATOR_RE.test(t)) return false;
-      // SEC-1 (d): leading document-root token (`body > div`, `html .foo`).
-      if (BLOCKED_LEADING_RE.test(t)) return false;
+      if (BARE_ATTR_RE.test(stripped)) return false;
+      // SEC-1 (c): universal selector as an unqualified combinator target
+      // (`div > *`, `ul *`) — a qualified one (`div > *[data-ad]`) is safe.
+      if (UNIVERSAL_COMBINATOR_RE.test(stripped)) return false;
+      // SEC-1 (d): body/html/head/:root as the sole target (`body`,
+      // `body.ad-banner`) — used as a descendant root (`body .ad-container`)
+      // is left alone.
+      if (BLOCKED_LEADING_RE.test(stripped)) return false;
       // PERF-08 — validate selector SYNTAX without traversing the DOM.
       // CSS.supports('selector(...)') uses the CSS parser only (no querySelector
       // walk), so a long site-killers list doesn't trigger N full-document scans
@@ -397,8 +467,25 @@
     });
     if (selectors.length === 0) return false;
     const css = selectors.join(',\n') + ' { display: none !important; }';
+
+    // Already injected with the exact same rules — nothing to do.
+    if (siteKillerStyleEl && siteKillerStyleEl.textContent === css) return false;
+
+    if (siteKillerStyleEl) {
+      // Rules changed mid-session (e.g. an updated site-killers list arrived
+      // via a settings update) — update the existing element instead of
+      // silently ignoring the change until the feature is toggled off/on.
+      siteKillerStyleEl.textContent = css;
+      return true;
+    }
+
     const insert = () => {
       if (siteKillerStyleEl) return;
+      // The feature may have been toggled off again before DOMContentLoaded
+      // fired for this deferred injection — re-check the live flag so a
+      // rapid toggle-off/on right at page load doesn't still result in a
+      // permanent injection.
+      if (!settings.siteKillersEnabled || settings.siteKillers.length === 0) return;
       siteKillerStyleEl = document.createElement('style');
       siteKillerStyleEl.setAttribute(POTATO_ATTR, 'site-killer');
       siteKillerStyleEl.textContent = css;
@@ -417,29 +504,84 @@
     siteKillerStyleEl = null;
   }
 
+  // ---------- Shadow DOM traversal ----------
+  // Plain querySelectorAll never crosses shadow boundaries, so elements
+  // inside a custom element's shadow root (video players, ad widgets built
+  // as web components) were invisible to every content-layer feature. This
+  // walks the light DOM and recurses into any shadowRoot it finds.
+  // Scope: covers the initial full-document pass and newly-added subtrees
+  // seen by the MutationObserver. Content added LATER inside an
+  // already-processed shadow root (after its host was already walked) isn't
+  // separately re-observed — a narrower, lower-risk trade than wiring up a
+  // dedicated MutationObserver per shadow root.
+  function deepQueryAll(root, selector, out) {
+    out = out || [];
+    if (!root || !root.children) return out;
+    for (const el of root.children) {
+      if (typeof el.matches === 'function' && el.matches(selector)) out.push(el);
+      if (el.shadowRoot) deepQueryAll(el.shadowRoot, selector, out);
+      if (el.children && el.children.length) deepQueryAll(el, selector, out);
+    }
+    return out;
+  }
+
   // ---------- Image lite (B1: restore srcset on toggle-off) ----------
 
   const processedImages = new WeakSet();
   // Stores { srcset, sizes } captured before stripping so we can restore the
   // original quality if the user disables imageLowQualityEnabled mid-session.
   const imageOriginalSrcset = new WeakMap();
+  // Tracks <img> elements where we synthesized a fallback `src` (see below)
+  // so restoreImageQuality() can remove it again rather than leaving it stuck.
+  const injectedFallbackSrc = new WeakSet();
+
+  // Picks the smallest candidate URL out of a srcset string, used as a `src`
+  // fallback for <img> elements that rely solely on srcset (valid, common
+  // responsive-image markup) — without this, stripping srcset left them with
+  // no source at all and rendered as a broken image.
+  function smallestSrcsetCandidate(srcset) {
+    if (!srcset) return '';
+    const candidates = srcset.split(',').map(s => s.trim()).filter(Boolean).map(entry => {
+      const parts = entry.split(/\s+/);
+      const descriptor = parts[1] || '';
+      return { url: parts[0], num: parseFloat(descriptor) || 0, isWidth: descriptor.endsWith('w') };
+    });
+    if (candidates.length === 0) return '';
+    const widthCandidates = candidates.filter(c => c.isWidth && c.num > 0);
+    if (widthCandidates.length > 0) {
+      widthCandidates.sort((a, b) => a.num - b.num);
+      return widthCandidates[0].url;
+    }
+    return candidates[0].url; // density (x) descriptors don't map to size — just take the first
+  }
 
   function lazifyImage(el) {
     if (!el) return false;
-    if (el.tagName !== 'IMG' && el.tagName !== 'IFRAME') return false;
+    const tag = el.tagName;
+    // <picture><source> elements carry their own srcset for responsive
+    // images/art-direction but have no `loading`/`decoding` concept of
+    // their own — only IMG/IFRAME get the lazyload attributes below.
+    if (tag !== 'IMG' && tag !== 'IFRAME' && tag !== 'SOURCE') return false;
     try {
       let changed = false;
       if (settings.imageLazyEnabled) {
-        if (!el.hasAttribute('loading')) { el.setAttribute('loading', 'lazy'); changed = true; }
-        if (el.tagName === 'IMG' && !el.hasAttribute('decoding')) { el.setAttribute('decoding', 'async'); changed = true; }
-        if (el.tagName === 'IMG' && !el.hasAttribute('fetchpriority')) { el.setAttribute('fetchpriority', 'low'); changed = true; }
+        if ((tag === 'IMG' || tag === 'IFRAME') && !el.hasAttribute('loading')) { el.setAttribute('loading', 'lazy'); changed = true; }
+        if (tag === 'IMG' && !el.hasAttribute('decoding')) { el.setAttribute('decoding', 'async'); changed = true; }
+        if (tag === 'IMG' && !el.hasAttribute('fetchpriority')) { el.setAttribute('fetchpriority', 'low'); changed = true; }
       }
-      if (settings.imageLowQualityEnabled && el.tagName === 'IMG' && el.hasAttribute('srcset')) {
+      if (settings.imageLowQualityEnabled && (tag === 'IMG' || tag === 'SOURCE') && el.hasAttribute('srcset')) {
         if (!imageOriginalSrcset.has(el)) {
           imageOriginalSrcset.set(el, {
             srcset: el.getAttribute('srcset'),
             sizes: el.getAttribute('sizes') || ''
           });
+        }
+        if (tag === 'IMG' && !el.hasAttribute('src')) {
+          const fallback = smallestSrcsetCandidate(el.getAttribute('srcset'));
+          if (fallback) {
+            el.setAttribute('src', fallback);
+            injectedFallbackSrc.add(el);
+          }
         }
         el.removeAttribute('srcset');
         el.removeAttribute('sizes');
@@ -451,9 +593,9 @@
   }
 
   function applyImageLazyAll(root) {
-    if (!root || !root.querySelectorAll) return false;
+    if (!root) return false;
     let count = 0;
-    const nodes = root.querySelectorAll('img, iframe');
+    const nodes = deepQueryAll(root, 'img, iframe, source');
     for (const n of nodes) {
       if (processedImages.has(n)) continue;
       if (lazifyImage(n)) count++;
@@ -463,16 +605,26 @@
   }
 
   function restoreImageQuality() {
-    if (!document.querySelectorAll) return;
-    const nodes = document.querySelectorAll('img');
+    const nodes = deepQueryAll(document, 'img, source');
     for (const n of nodes) {
       const orig = imageOriginalSrcset.get(n);
-      if (!orig) continue;
-      try {
-        if (orig.srcset) n.setAttribute('srcset', orig.srcset);
-        if (orig.sizes) n.setAttribute('sizes', orig.sizes);
-      } catch (e) {}
-      imageOriginalSrcset.delete(n);
+      if (orig) {
+        try {
+          if (orig.srcset) n.setAttribute('srcset', orig.srcset);
+          if (orig.sizes) n.setAttribute('sizes', orig.sizes);
+          if (n.tagName === 'IMG' && injectedFallbackSrc.has(n)) {
+            n.removeAttribute('src');
+            injectedFallbackSrc.delete(n);
+          }
+        } catch (e) {}
+        imageOriginalSrcset.delete(n);
+      }
+      // processedImages is shared between imageLazyEnabled and
+      // imageLowQualityEnabled as a cheap "already looked at this element"
+      // skip in applyImageLazyAll. Without clearing it here, an image
+      // touched once by either feature could never be re-processed by
+      // either feature again for the rest of the page's life.
+      processedImages.delete(n);
     }
   }
 
@@ -483,10 +635,16 @@
 
   function stripPrefetchLink(el) {
     if (!el || processedLinks.has(el) || el.tagName !== 'LINK') return false;
-    const rel = (el.getAttribute('rel') || '').toLowerCase().trim();
-    if (PREFETCH_RELS.has(rel)) {
+    // rel is a space-separated token list (e.g. "preload prefetch"); matching
+    // the whole trimmed string against PREFETCH_RELS missed any link with
+    // more than one token.
+    const relTokens = (el.getAttribute('rel') || '').toLowerCase().trim().split(/\s+/);
+    const isPrefetchy = relTokens.some(t => PREFETCH_RELS.has(t));
+    if (isPrefetchy) {
+      if (!el.parentNode) return false; // detached — leave unprocessed so a
+                                         // later re-attach still gets stripped
       try {
-        el.parentNode && el.parentNode.removeChild(el);
+        el.parentNode.removeChild(el);
         // L-1 — only mark processed after a successful removal, so a throwing
         // removeChild doesn't permanently skip an element still in the DOM.
         processedLinks.add(el);
@@ -499,9 +657,9 @@
   }
 
   function applyPrefetchStripAll(root) {
-    if (!root || !root.querySelectorAll) return;
+    if (!root) return;
     let count = 0;
-    const nodes = root.querySelectorAll('link[rel]');
+    const nodes = deepQueryAll(root, 'link[rel]');
     for (const n of nodes) if (stripPrefetchLink(n)) count++;
     if (count) reportStat('prefetchStripped', count);
   }
@@ -526,9 +684,9 @@
   }
 
   function killAutoplayAll(root) {
-    if (!root || !root.querySelectorAll) return false;
+    if (!root) return false;
     let count = 0;
-    const nodes = root.querySelectorAll('video, audio');
+    const nodes = deepQueryAll(root, 'video, audio');
     for (const n of nodes) if (killAutoplay(n)) count++;
     if (count) reportStat('autoplayKilled', count);
     return count > 0;
@@ -555,19 +713,45 @@
   function processMutations(mutations, snap) {
     let relevant = false;
     for (const m of mutations) {
+      if (m.type === 'attributes') {
+        // SPAs frequently recycle DOM nodes by mutating an EXISTING element's
+        // src/srcset/rel/autoplay in place rather than inserting a new node —
+        // childList-only observation misses these entirely.
+        const target = m.target;
+        if (!target || target.nodeType !== 1) continue;
+        relevant = true;
+        const tag = target.tagName;
+        const attr = m.attributeName;
+        if ((snap.imageLazyEnabled || snap.imageLowQualityEnabled) &&
+            (attr === 'src' || attr === 'srcset') &&
+            (tag === 'IMG' || tag === 'IFRAME' || tag === 'SOURCE')) {
+          if (lazifyImage(target)) reportStat('imagesLazied', 1);
+        } else if (snap.prefetchStripEnabled && attr === 'rel' && tag === 'LINK') {
+          // A rel change can turn a previously-inspected link into a
+          // prefetch one (or vice versa) — clear the processed flag so it's
+          // re-evaluated instead of being skipped forever.
+          processedLinks.delete(target);
+          if (stripPrefetchLink(target)) reportStat('prefetchStripped', 1);
+        } else if (snap.autoplayKillEnabled && attr === 'autoplay' && (tag === 'VIDEO' || tag === 'AUDIO')) {
+          processedMedia.delete(target);
+          if (killAutoplay(target)) reportStat('autoplayKilled', 1);
+        }
+        continue;
+      }
       for (const node of m.addedNodes) {
         if (node.nodeType !== 1) continue;
         relevant = true;
         const tag = node.tagName;
 
         // PERF-06 — only descend into added subtrees that actually have element
-        // children. A leaf node (<span>, a text wrapper) has children.length === 0,
-        // so querySelectorAll would scan for nothing; the guard skips that cost on
-        // highly dynamic pages (React re-renders, infinite scroll).
-        const hasKids = node.children && node.children.length > 0 && node.querySelectorAll;
+        // children (or a shadow root, which won't show up in .children). A leaf
+        // node (<span>, a text wrapper) has neither, so a deep query would scan
+        // for nothing; the guard skips that cost on highly dynamic pages (React
+        // re-renders, infinite scroll).
+        const hasKids = (node.children && node.children.length > 0) || !!node.shadowRoot;
 
         if (snap.imageLazyEnabled || snap.imageLowQualityEnabled) {
-          if (tag === 'IMG' || tag === 'IFRAME') {
+          if (tag === 'IMG' || tag === 'IFRAME' || tag === 'SOURCE') {
             if (lazifyImage(node)) reportStat('imagesLazied', 1);
           } else if (hasKids) {
             applyImageLazyAll(node);
@@ -630,7 +814,12 @@
       };
       _requestIdleCallback(() => processMutations(mutations, snap), { timeout: 500 });
     });
-    observer.observe(target, { childList: true, subtree: true });
+    observer.observe(target, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['src', 'srcset', 'rel', 'autoplay']
+    });
   }
 
   function stopObserver() {
@@ -687,8 +876,19 @@
     if (!settings.imageLowQualityEnabled) restoreImageQuality();
     if (settings.prefetchStripEnabled) applyPrefetchStripAll(document);
     if (settings.autoplayKillEnabled) killAutoplayAll(document);
+
+    // Per-toggle restore paths (mirroring the imageLowQualityEnabled pattern
+    // above) — previously restoreVideoPlayability/restoreVideoPreloadNone were
+    // only called in the full-teardown branch, so disabling just ONE of these
+    // two toggles while another feature stayed on left affected videos
+    // permanently paused / stuck at preload="none" for the rest of the session.
+    if (settings.videoPauseEnabled) {
+      if (isHidden()) pauseAllVideos(document);
+    } else {
+      restoreVideoPlayability(document);
+    }
     if (settings.videoPreloadNoneEnabled) applyVideoPreloadNoneAll(document);
-    if (settings.videoPauseEnabled && isHidden()) pauseAllVideos(document);
+    else restoreVideoPreloadNone(document);
 
     if (anyContentFeatureEnabled()) startObserver(); else stopObserver();
   }
@@ -739,6 +939,16 @@
     images: []
   };
 
+  // Hostname-anchored (not substring) tracker domain match — a bare
+  // `facebook\.com` substring check against the full URL false-positived on
+  // hosts like "cdn.notfacebook.com". `(^|\.)host$` requires an exact host or
+  // a proper subdomain of it.
+  const TRACKER_HOST_RE = /(^|\.)(google-analytics\.com|googletagmanager\.com|facebook\.com|segment\.com|mixpanel\.com|amplitude\.com|hotjar\.com|intercom\.io|drift\.com)$/i;
+  const FONT_HOST_RE = /(^|\.)(fonts\.googleapis\.com|fonts\.gstatic\.com)$/i;
+  const FONT_EXT_RE = /\.(woff2?|ttf|otf)$/i;
+  const SCRIPT_EXT_RE = /\.js$/i;
+  const IMAGE_EXT_RE = /\.(jpg|jpeg|png|gif|webp|svg|ico)$/i;
+
   function initResourceObserver() {
     if (typeof PerformanceObserver === 'undefined') return;
 
@@ -750,13 +960,20 @@
           const size = entry.transferSize || entry.decodedBodySize || 0;
           if (size === 0) continue;
 
-          if (/google-analytics|facebook\.com|segment\.com|mixpanel|amplitude|hotjar|intercom|drift/.test(url)) {
+          let hostname = '', pathname = '';
+          try {
+            const u = new URL(url);
+            hostname = u.hostname;
+            pathname = u.pathname; // excludes query string / hash, unlike matching the raw url
+          } catch (e) { continue; }
+
+          if (TRACKER_HOST_RE.test(hostname)) {
             if (resourceStats.trackers.length < 500) resourceStats.trackers.push(size);
-          } else if (/\.woff2?|\.ttf|\.otf|fonts\.googleapis|fonts\.gstatic/.test(url)) {
+          } else if (FONT_EXT_RE.test(pathname) || FONT_HOST_RE.test(hostname)) {
             if (resourceStats.fonts.length < 500) resourceStats.fonts.push(size);
-          } else if (/\.js$/.test(url)) {
+          } else if (SCRIPT_EXT_RE.test(pathname)) {
             if (resourceStats.scripts.length < 500) resourceStats.scripts.push(size);
-          } else if (/\.(jpg|jpeg|png|gif|webp|svg|ico)$/i.test(url)) {
+          } else if (IMAGE_EXT_RE.test(pathname)) {
             if (resourceStats.images.length < 500) resourceStats.images.push(size);
           }
         }
@@ -779,16 +996,26 @@
       images: median(resourceStats.images),
     };
 
+    // Snapshot which arrays had data so only those get cleared, and only once
+    // the send actually lands — clearing unconditionally beforehand dropped
+    // the whole batch for good whenever the SW was unreachable (e.g. mid-
+    // suspend), instead of letting it ride to the next 30s interval.
+    const hadData = {
+      trackers: resourceStats.trackers.length > 0,
+      fonts: resourceStats.fonts.length > 0,
+      scripts: resourceStats.scripts.length > 0,
+      images: resourceStats.images.length > 0
+    };
+
     chrome.runtime.sendMessage({
       type: 'CALIBRATE_BANDWIDTH',
       data: calibration
-    }).catch(() => {}); // Silent fail
-
-    // Reset for next batch — only clear arrays that contributed to this send
-    if (resourceStats.trackers.length > 0) resourceStats.trackers = [];
-    if (resourceStats.fonts.length > 0)    resourceStats.fonts = [];
-    if (resourceStats.scripts.length > 0)  resourceStats.scripts = [];
-    if (resourceStats.images.length > 0)   resourceStats.images = [];
+    }).then(() => {
+      if (hadData.trackers) resourceStats.trackers = [];
+      if (hadData.fonts)    resourceStats.fonts = [];
+      if (hadData.scripts)  resourceStats.scripts = [];
+      if (hadData.images)   resourceStats.images = [];
+    }).catch(() => {}); // leave buffers intact so the next interval retries
   }
 
   // Median helper (local copy for IIFE context; lib version used by service-worker.js)
