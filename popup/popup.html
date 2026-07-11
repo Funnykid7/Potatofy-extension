@@ -24,7 +24,7 @@
             <option value="lifetime">all-time</option>
           </select>
         </span>
-        <span class="popup-stats-chip" aria-hidden="true">live</span>
+        <span class="popup-stats-chip">live</span>
       </div>
       <div class="popup-stat-row">
         <span>RAM saved</span>
@@ -43,7 +43,7 @@
         <span class="num" id="stat-req">—</span>
       </div>
       <div class="popup-stat-row">
-        <span>3rd-party scripts</span>
+        <span>3rd-party blocked</span>
         <span class="num warn" id="stat-3p">—</span>
       </div>
       <div class="popup-stat-row">
@@ -204,7 +204,7 @@
         <span class="section-meta" data-meta-for="memory"></span>
       </summary>
       <div class="popup-toggles">
-        <div class="popup-toggle">
+        <div class="popup-toggle popup-toggle--expand">
           <div class="popup-toggle-text">
             <label for="toggle-pressure">Auto-discard on low RAM</label>
             <p>Discards idle tabs when free memory dips.</p>
@@ -254,12 +254,12 @@
           <label class="sw-wrap"><input type="checkbox" id="toggle-sync-hosts"><span class="sw"></span></label>
         </div>
 
-        <details class="nested-list">
+        <details class="nested-list" data-section="whitelist-nested">
           <summary>Whitelisted sites <span id="whitelist-count" class="meta-count">0</span></summary>
           <ul id="whitelist-list" class="host-list"></ul>
         </details>
 
-        <details class="nested-list">
+        <details class="nested-list" data-section="potato-nested">
           <summary>Potato-mode sites <span id="potato-count" class="meta-count">0</span></summary>
           <ul id="potato-list" class="host-list"></ul>
         </details>
@@ -291,7 +291,7 @@
           <li>✓ Optional cloud sync (off by default)</li>
           <li>✓ Open source — audit the code on GitHub</li>
         </ul>
-        <a href="https://funnykid7.github.io/Potatofy-extension/privacy.html" target="_blank" rel="noopener" class="btn btn-primary btn-full">
+        <a href="https://funnykid7.github.io/Potatofy-extension/privacy.html" target="_blank" rel="noopener noreferrer" class="btn-pill btn-primary btn-full">
           Read Full Privacy Policy
         </a>
       </div>
@@ -300,7 +300,7 @@
           <input type="checkbox" id="privacy-accept-check" />
           <span>I've read and accept the privacy policy</span>
         </label>
-        <button id="privacy-accept-btn" class="btn btn-primary" disabled>Accept & Continue</button>
+        <button id="privacy-accept-btn" class="btn-pill btn-primary" disabled>Accept & Continue</button>
       </div>
     </div>
   </div>

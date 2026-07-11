@@ -53,6 +53,7 @@ let currentSettings = { ...DEFAULT_SETTINGS };
 let currentHostname = null;
 
 let currentTabId = null;
+let discardConfirmPending = false;
 
 async function getActiveTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -70,11 +71,31 @@ async function getActiveHostname() {
   } catch { return null; }
 }
 
+// Mirrors service-worker.js's isHostWhitelisted — a plain `.includes()`
+// against the whitelist array missed suffix matches (e.g. a stored
+// "www.example.com" entry vs. the normalized "example.com" hostname), so the
+// popup could show "Whitelist This Site" for a host the SW already treats as
+// whitelisted.
+function isHostWhitelisted(hostname, whitelist) {
+  const host = normalizeHost(hostname);
+  return (whitelist || []).some(d => {
+    const dn = normalizeHost(d);
+    return host === dn || host.endsWith('.' + dn);
+  });
+}
+
 // N-3 — single place that merges a stored/changed settings blob over the
 // defaults, shared by loadSettings and the storage.onChanged listener so the
 // two can't drift.
 function mergeSettings(src) {
-  return { ...DEFAULT_SETTINGS, ...(src || {}) };
+  const merged = { ...DEFAULT_SETTINGS, ...(src || {}) };
+  // The shallow spread above shares the nested whitelist/potatoSites default
+  // objects by reference when `src` doesn't provide them — a later in-place
+  // mutation (e.g. bindSiteActions' whitelist push/splice) would then corrupt
+  // the module-level DEFAULT_SETTINGS for the rest of the popup's lifetime.
+  merged.whitelist = Array.isArray(merged.whitelist) ? [...merged.whitelist] : [];
+  merged.potatoSites = { ...(merged.potatoSites || {}) };
+  return merged;
 }
 
 async function loadSettings() {
@@ -97,6 +118,13 @@ function showToast(msg) {
     document.body.appendChild(el);
   }
   el.classList.remove('fade-out');
+  // Force the entrance animation to replay even when reusing an existing
+  // element — removing the class, forcing a reflow, then re-adding it
+  // restarts the CSS animation instead of silently no-op'ing because the
+  // class was already present from a prior toast.
+  el.classList.remove('toast-animate-in');
+  void el.offsetWidth; // force reflow
+  el.classList.add('toast-animate-in');
   el.textContent = msg;
   if (toastTimer) clearTimeout(toastTimer);
   if (toastFadeTimer) clearTimeout(toastFadeTimer);
@@ -134,7 +162,11 @@ function renderToggles() {
   const minutes = Number(currentSettings.idleThresholdMinutes) || 5;
   els.threshold.value = String(ALLOWED_THRESHOLDS.includes(minutes) ? minutes : 5);
   els.threshold.disabled = !currentSettings.tabSuspendEnabled;
-  els.discardNow.disabled = false;
+  // Don't blindly re-enable while a "Discarded N tabs" confirmation is still
+  // showing — a storage.onChanged-triggered renderAll() firing during that
+  // 2s window would otherwise let the button be clicked again before its own
+  // confirmation animation finishes/resets.
+  els.discardNow.disabled = discardConfirmPending;
 
   const pmb = Number(currentSettings.memoryPressureThresholdMB) || 500;
   els.pressureThresh.value = String(ALLOWED_PRESSURE_MB.includes(pmb) ? pmb : 500);
@@ -157,6 +189,7 @@ async function refreshBoostState() {
   if (!Number.isFinite(currentTabId) || !currentHostname) {
     els.boostBtn.dataset.boosted = '0';
     els.boostBtn.classList.remove('active');
+    setBoostBtnDefault(); // reset stale "Remove boost" text left from a prior tab
     return;
   }
   try {
@@ -174,6 +207,7 @@ async function refreshBoostState() {
   } catch (e) {
     els.boostBtn.dataset.boosted = '0';
     els.boostBtn.classList.remove('active');
+    setBoostBtnDefault();
   }
 }
 
@@ -191,7 +225,7 @@ function renderWhitelistButton() {
   els.boostBtn.disabled = false;
   els.killJsBtn.disabled = false;
   els.killImgBtn.disabled = false;
-  const isWl = (currentSettings.whitelist || []).includes(currentHostname);
+  const isWl = isHostWhitelisted(currentHostname, currentSettings.whitelist);
   if (isWl) {
     els.whitelistBtn.textContent = 'Remove from Whitelist';
     els.whitelistBtn.classList.add('remove');
@@ -243,12 +277,16 @@ function renderWhitelistList() {
       // the render-time `list`. A settings update (storage.onChanged) can replace
       // currentSettings.whitelist between renders; filtering the stale array would
       // silently drop any entries added since this row was rendered.
+      const prev = currentSettings.whitelist || [];
       try {
-        const cur = currentSettings.whitelist || [];
-        currentSettings.whitelist = cur.filter(h => h !== host);
+        currentSettings.whitelist = prev.filter(h => h !== host);
         await pushSettings();
         renderAll();
       } catch (e) {
+        // Revert — otherwise the row visually disappears even though the SW
+        // never actually removed it from the persisted whitelist.
+        currentSettings.whitelist = prev;
+        renderAll();
         showToast('Failed to save — please try again');
       }
     });
@@ -300,28 +338,39 @@ function renderAll() {
 
 const SECTION_STATE_KEY = 'popupSectionOpen';
 
+// In-memory mirror of the persisted state, updated synchronously on every
+// toggle. Previously each toggle handler did its own read-modify-write
+// straight to session storage; two sections toggled in rapid succession
+// could read the same stale snapshot and the second write would clobber the
+// first section's change.
+let sectionState = {};
+let sectionPersistTimer = null;
+
 async function restoreSectionState() {
   try {
     const data = await chrome.storage.session.get(SECTION_STATE_KEY);
     const state = data[SECTION_STATE_KEY];
-    if (!state || typeof state !== 'object') return;
-    for (const el of document.querySelectorAll('details.section')) {
+    if (state && typeof state === 'object') sectionState = { ...state };
+    // Also covers the nested whitelist/potato-mode accordions (details.nested-list)
+    // — previously excluded because they lack the .section class, so users
+    // with large lists had to manually re-expand them on every popup open.
+    for (const el of document.querySelectorAll('details.section, details.nested-list')) {
       const k = el.dataset.section;
-      if (k in state) el.open = !!state[k];
+      if (k in sectionState) el.open = !!sectionState[k];
     }
   } catch (e) {}
 }
 
 function bindSectionPersist() {
-  const sections = document.querySelectorAll('details.section');
+  const sections = document.querySelectorAll('details.section, details.nested-list');
   for (const el of sections) {
-    el.addEventListener('toggle', async () => {
-      try {
-        const data = await chrome.storage.session.get(SECTION_STATE_KEY);
-        const state = (data && data[SECTION_STATE_KEY]) || {};
-        state[el.dataset.section] = el.open;
-        await chrome.storage.session.set({ [SECTION_STATE_KEY]: state });
-      } catch (e) {}
+    el.addEventListener('toggle', () => {
+      sectionState[el.dataset.section] = el.open;
+      if (sectionPersistTimer) return;
+      sectionPersistTimer = setTimeout(async () => {
+        sectionPersistTimer = null;
+        try { await chrome.storage.session.set({ [SECTION_STATE_KEY]: sectionState }); } catch (e) {}
+      }, 300);
     });
   }
 }
@@ -349,7 +398,11 @@ async function refreshStats() {
     // When present the headline isn't purely heuristic, so drop the "~" estimate
     // prefix. (The former heap-measurement breakdown.measured branch was removed.)
     const hasMeasuredData = (counters.realRamFreed || 0) > 0 || (savings.breakdown?.real?.ramBytes ?? 0) > 0;
-    const ramPrefix = hasMeasuredData ? '' : (isCapped ? '≥' : '~');
+    // isCapped must win regardless of hasMeasuredData — the displayed value
+    // was clamped down from the true total, so showing it as an exact
+    // measurement (no prefix) would misrepresent it even when part of the
+    // total came from a real measurement.
+    const ramPrefix = isCapped ? '≥' : (hasMeasuredData ? '' : '~');
     const ramDisplay = ramPrefix + formatBytes(ramDisplayed);
 
     els.statRam.textContent  = ramDisplay;
@@ -386,6 +439,11 @@ function bindToggles() {
   ];
   for (const [el, key] of map) {
     el.addEventListener('change', async () => {
+      // Capture pre-mutation state so a failed save can be rolled back —
+      // otherwise the toggle stayed visually flipped even though the SW
+      // never actually applied the change.
+      const prev = currentSettings[key];
+      const prevSyncHostsToCloud = currentSettings.syncHostsToCloud;
       currentSettings[key] = el.checked;
       if (el === els.suspend) els.threshold.disabled = !el.checked;
       if (el === els.pressure) els.pressureThresh.disabled = !el.checked;
@@ -398,10 +456,18 @@ function bindToggles() {
           els.syncHosts.checked = false;
         }
       }
+      // Disable while the save is in flight so rapid re-toggling can't fire
+      // overlapping UPDATE_SETTINGS calls whose responses land out of order.
+      el.disabled = true;
       try {
         await pushSettings();
       } catch (e) {
+        currentSettings[key] = prev;
+        currentSettings.syncHostsToCloud = prevSyncHostsToCloud;
+        renderAll();
         showToast('Failed to save — please try again');
+      } finally {
+        el.disabled = false;
       }
     });
   }
@@ -409,28 +475,41 @@ function bindToggles() {
 
 function bindSuspendControls() {
   els.threshold.addEventListener('change', async () => {
+    const prev = currentSettings.idleThresholdMinutes;
     const v = Number(els.threshold.value);
     currentSettings.idleThresholdMinutes = ALLOWED_THRESHOLDS.includes(v) ? v : 5;
+    els.threshold.disabled = true;
     try {
       await pushSettings();
     } catch (e) {
+      currentSettings.idleThresholdMinutes = prev;
+      renderAll();
       showToast('Failed to save — please try again');
+      return; // renderAll() above already restored the correct disabled state
     }
+    els.threshold.disabled = !currentSettings.tabSuspendEnabled;
   });
 
   els.pressureThresh.addEventListener('change', async () => {
+    const prev = currentSettings.memoryPressureThresholdMB;
     const v = Number(els.pressureThresh.value);
     currentSettings.memoryPressureThresholdMB = ALLOWED_PRESSURE_MB.includes(v) ? v : 500;
+    els.pressureThresh.disabled = true;
     try {
       await pushSettings();
     } catch (e) {
+      currentSettings.memoryPressureThresholdMB = prev;
+      renderAll();
       showToast('Failed to save — please try again');
+      return;
     }
+    els.pressureThresh.disabled = !currentSettings.memoryPressureEnabled;
   });
 
   els.discardNow.addEventListener('click', async () => {
     const original = els.discardNow.textContent;
     els.discardNow.disabled = true;
+    discardConfirmPending = true;
     try {
       const reply = await chrome.runtime.sendMessage({ type: 'DISCARD_NOW' });
       const count = (reply && reply.count) || 0;
@@ -443,6 +522,7 @@ function bindSuspendControls() {
     setTimeout(() => {
       els.discardNow.textContent = original;
       els.discardNow.classList.remove('confirmed');
+      discardConfirmPending = false;
       els.discardNow.disabled = false;
     }, 2000);
   });
@@ -451,7 +531,11 @@ function bindSuspendControls() {
 function bindSiteActions() {
   els.whitelistBtn.addEventListener('click', async () => {
     if (!currentHostname) return;
-    const list = currentSettings.whitelist || [];
+    const prevList = currentSettings.whitelist || [];
+    // Clone instead of mutating in place — the live array can be replaced by
+    // a concurrent storage.onChanged update between the read and the write,
+    // orphaning an in-place push/splice on the old array reference.
+    const list = [...prevList];
     const idx = list.indexOf(currentHostname);
     if (idx >= 0) {
       list.splice(idx, 1);
@@ -471,7 +555,8 @@ function bindSiteActions() {
       await pushSettings();
       renderAll();
     } catch (e) {
-      els.whitelistBtn.disabled = false;
+      currentSettings.whitelist = prevList;
+      renderAll();
       showToast('Failed to save — please try again');
     }
   });
@@ -480,6 +565,7 @@ function bindSiteActions() {
     if (!currentHostname || !Number.isFinite(currentTabId)) return;
     // D: toggle behaviour — if already boosted, send CLEAR_BOOST instead.
     const isBoosted = els.boostBtn.dataset.boosted === '1';
+    const clickedTabId = currentTabId; // tab this click applies to
     els.boostBtn.disabled = true;
     try {
       if (isBoosted) {
@@ -504,10 +590,16 @@ function bindSiteActions() {
       els.boostBtn.textContent = 'Failed';
     }
     setTimeout(async () => {
-      // SEC-3 / NIT-2 — restore via the shared helper (single source of truth).
-      setBoostBtnDefault();
       els.boostBtn.classList.remove('confirmed');
+      // If the user switched to a different (or invalid) tab while the 1.8s
+      // confirmation was showing, leave this button alone — the tab-activation
+      // handler already owns its state for the new tab context.
+      if (currentTabId !== clickedTabId || !currentHostname) return;
       els.boostBtn.disabled = false;
+      // refreshBoostState() itself sets the correct label (default text or
+      // "Remove boost"); calling setBoostBtnDefault() first, before it
+      // resolves, caused a one-frame flash to the wrong label for tabs that
+      // were still actually boosted.
       await refreshBoostState();
     }, 1800);
   });
@@ -515,28 +607,48 @@ function bindSiteActions() {
   els.killJsBtn.addEventListener('click', async () => {
     if (!currentHostname) return;
     const current = (currentSettings.potatoSites || {})[currentHostname] || { js: false, img: false };
+    const nextJs = !current.js;
+    els.killJsBtn.disabled = true;
     try {
       await chrome.runtime.sendMessage({
-        type: 'TOGGLE_POTATO_SITE', host: currentHostname, js: !current.js
+        type: 'TOGGLE_POTATO_SITE', host: currentHostname, js: nextJs
       });
-      await loadSettings();
+      // Optimistically update in-memory state instead of loadSettings(),
+      // which re-reads chrome.storage.local and could race the SW's async
+      // write — briefly flashing the pre-toggle state back before the
+      // storage.onChanged listener corrected it a moment later.
+      const sites = { ...(currentSettings.potatoSites || {}) };
+      const next = { js: nextJs, img: current.img };
+      if (!next.js && !next.img) delete sites[currentHostname];
+      else sites[currentHostname] = next;
+      currentSettings.potatoSites = sites;
       renderAll();
     } catch (e) {
       showToast('Failed to save — please try again');
+    } finally {
+      els.killJsBtn.disabled = false;
     }
   });
 
   els.killImgBtn.addEventListener('click', async () => {
     if (!currentHostname) return;
     const current = (currentSettings.potatoSites || {})[currentHostname] || { js: false, img: false };
+    const nextImg = !current.img;
+    els.killImgBtn.disabled = true;
     try {
       await chrome.runtime.sendMessage({
-        type: 'TOGGLE_POTATO_SITE', host: currentHostname, img: !current.img
+        type: 'TOGGLE_POTATO_SITE', host: currentHostname, img: nextImg
       });
-      await loadSettings();
+      const sites = { ...(currentSettings.potatoSites || {}) };
+      const next = { js: current.js, img: nextImg };
+      if (!next.js && !next.img) delete sites[currentHostname];
+      else sites[currentHostname] = next;
+      currentSettings.potatoSites = sites;
       renderAll();
     } catch (e) {
       showToast('Failed to save — please try again');
+    } finally {
+      els.killImgBtn.disabled = false;
     }
   });
 }
@@ -571,8 +683,16 @@ function bindStorageListener() {
 // row stayed stuck on whichever tab was active at popup open.
 function bindTabActivation() {
   if (!chrome.tabs || !chrome.tabs.onActivated) return;
+  // Tag each refresh with a sequence number so an EARLIER call that happens
+  // to resolve AFTER a later one (rapid tab switching, or a background tab
+  // finishing a load) discards its now-stale result instead of clobbering
+  // the UI with the wrong tab's hostname.
+  let refreshSeq = 0;
   const refreshSite = async () => {
-    currentHostname = await getActiveHostname();
+    const seq = ++refreshSeq;
+    const hostname = await getActiveHostname();
+    if (seq !== refreshSeq) return; // superseded by a newer call
+    currentHostname = hostname;
     els.hostname.textContent = currentHostname || 'unavailable';
     renderWhitelistButton();
     await refreshBoostState();
@@ -663,15 +783,23 @@ async function checkPrivacyAcceptance() {
 
 function showPrivacyModal() {
   privacyModal.style.display = 'flex';
-  document.querySelector('.popup').style.pointerEvents = 'none';
-  document.querySelector('.popup').style.opacity = '0.4';
+  const popupEl = document.querySelector('.popup');
+  popupEl.style.pointerEvents = 'none';
+  popupEl.style.opacity = '0.4';
+  // pointer-events:none only blocks mouse/touch — a keyboard user could still
+  // Tab into the toggles/buttons underneath and activate them with the
+  // privacy policy unaccepted. `inert` removes the subtree from the tab
+  // order (and from AT) entirely.
+  popupEl.inert = true;
   privacyCheckbox.focus();
 }
 
 function hidePrivacyModal() {
   privacyModal.style.display = 'none';
-  document.querySelector('.popup').style.pointerEvents = 'auto';
-  document.querySelector('.popup').style.opacity = '1';
+  const popupEl = document.querySelector('.popup');
+  popupEl.style.pointerEvents = 'auto';
+  popupEl.style.opacity = '1';
+  popupEl.inert = false;
 }
 
 privacyCheckbox.addEventListener('change', () => {
@@ -689,28 +817,26 @@ privacyAcceptBtn.addEventListener('click', async () => {
     hidePrivacyModal();
     await initPopup();
   } catch (e) {
-    _initDone = false;
     console.error('[Potatofy] initPopup failed after privacy acceptance:', e);
     showPrivacyModal();
     showToast('Something went wrong — please try again');
   }
 });
 
-privacyModal.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') {
-    e.preventDefault();
-  }
-});
+// The native behavior of closing the extension popup on Escape is owned by
+// the browser shell — intercepting the keydown here cannot prevent that, so
+// this listener was a no-op.
 
-let _initDone = false;
-async function initPopup() {
-  if (_initDone) return;
-  _initDone = true;
-  currentHostname = await getActiveHostname();
-  els.hostname.textContent = currentHostname || 'unavailable';
-  await loadSettings();
-  await restoreSectionState();
-  renderAll();
+// bindAllOnce() registers every event listener exactly once, no matter how
+// many times initPopup() itself runs. Previously each bind*() call was
+// re-invoked on every initPopup() retry (e.g. the privacy-modal accept path
+// re-entering after an earlier failure), which registered a second,
+// duplicate listener on every toggle/button — one click then fired every
+// handler twice.
+let _bindsDone = false;
+function bindAllOnce() {
+  if (_bindsDone) return;
+  _bindsDone = true;
   bindToggles();
   bindSuspendControls();
   bindSiteActions();
@@ -719,14 +845,46 @@ async function initPopup() {
   bindStorageListener();
   bindSectionPersist();
   bindTabActivation();
-  // E1: hide the diagnostics accordion in packaged (Web Store) installs so
-  // end users can't accidentally wipe their session stats via the test suite.
-  if (IS_PACKAGED && els.runTestsBtn) {
-    const section = els.runTestsBtn.closest('details.section--diag');
-    if (section) section.style.display = 'none';
+}
+
+// Promise-based guard instead of a boolean: concurrent/overlapping calls
+// await the SAME in-flight attempt rather than one silently short-circuiting
+// on a flag that was already set true before any async work completed. On
+// failure the guard is cleared so a genuine retry (e.g. re-accepting the
+// privacy modal) re-runs the init sequence instead of getting stuck
+// half-initialized forever.
+let _initPromise = null;
+async function initPopup() {
+  if (_initPromise) return _initPromise;
+  _initPromise = (async () => {
+    currentHostname = await getActiveHostname();
+    els.hostname.textContent = currentHostname || 'unavailable';
+    await loadSettings();
+    await restoreSectionState();
+    renderAll();
+    bindAllOnce();
+    // E1: hide the diagnostics accordion in packaged (Web Store) installs so
+    // end users can't accidentally wipe their session stats via the test suite.
+    // Removed from the DOM entirely rather than display:none — the latter left
+    // it as the `.section:last-of-type` element for CSS purposes, so the
+    // last genuinely *visible* section lost its bottom-border rule.
+    if (IS_PACKAGED && els.runTestsBtn) {
+      const section = els.runTestsBtn.closest('details.section--diag');
+      if (section) section.remove();
+    }
+    refreshStats();
+    // Justifies the pulsing "live" badge on the stats card — without a poll
+    // loop, displayed numbers only updated on the SW's own ~60s flush cadence
+    // (or a manual action), which could lag well behind "live".
+    setInterval(refreshStats, 3000);
+    await refreshBoostState();
+  })();
+  try {
+    await _initPromise;
+  } catch (e) {
+    _initPromise = null;
+    throw e;
   }
-  refreshStats();
-  await refreshBoostState();
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -739,7 +897,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   try {
     await initPopup();
   } catch (e) {
-    _initDone = false;
     console.error('[Potatofy] initPopup failed on DOMContentLoaded:', e);
     showToast('Something went wrong — please try again');
   }

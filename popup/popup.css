@@ -319,6 +319,13 @@ code {
   border-color: var(--accent-border);
   color: var(--accent);
 }
+/* Same specificity as .btn-ghost:not(:disabled):hover above — without this,
+   hovering an already-active ghost button falls through to the plain hover
+   treatment instead of keeping an accent-tinted look. */
+.btn-ghost.active:not(:disabled):hover {
+  background: var(--accent-border);
+  color: var(--text);
+}
 .btn-ghost.remove {
   border-color: rgba(192, 57, 43, 0.4);
   color: #e07555;
@@ -508,6 +515,11 @@ code {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+/* A programmatically-disabled sub-toggle (e.g. "Also sync site lists" when
+   cloud sync is off) otherwise looked fully interactive — full opacity,
+   pointer cursor — even though clicking it did nothing. */
+.sw-wrap input:disabled + .sw { opacity: 0.4; }
+.sw-wrap:has(input:disabled) { cursor: not-allowed; }
 
 /* ============================================================
    Nested host lists (whitelist / potato sites)
@@ -684,9 +696,16 @@ code {
   font-size: 12px;
   line-height: 1.4;
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
-  z-index: 999;
-  animation: toast-in 0.18s ease-out;
+  /* Above .modal-box's z-index: 10000 — an error toast shown while the
+     privacy modal is open (initPopup() failing after acceptance) must stay
+     readable instead of rendering behind the modal backdrop. */
+  z-index: 10001;
 }
+/* Tied to a dedicated class instead of the base .toast selector so the
+   entrance animation can replay on reuse — showToast() strips .fade-out and
+   re-adds .toast-animate-in to force a fresh animation, whereas an animation
+   on .toast itself only ever plays once, on the element's initial creation. */
+.toast.toast-animate-in { animation: toast-in 0.18s ease-out; }
 .toast.fade-out { animation: toast-out 0.18s ease-in forwards; }
 @keyframes toast-in {
   from { opacity: 0; transform: translateY(8px); }
@@ -752,6 +771,10 @@ code {
   border-radius: var(--radius);
   padding: 24px;
   max-width: 420px;
+  /* The 320px-wide popup body is narrower than max-width, so with no margin
+     the box filled the popup edge-to-edge with no breathing room. */
+  width: calc(100% - 32px);
+  margin: 16px;
   display: flex;
   flex-direction: column;
   gap: 20px;
