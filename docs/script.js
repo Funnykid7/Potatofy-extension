@@ -2,7 +2,14 @@
    Three small jobs: copy-clone-command, scroll-reveal, smooth in-page nav. */
 
 (() => {
-  if (window.top !== window.self) { window.top.location = window.self.location; }
+  // A sandboxed iframe without allow-top-navigation throws a SecurityError on
+  // this write; without the try/catch, that exception aborted the whole
+  // script — including the copy button, scroll reveal, and smooth nav below.
+  try {
+    if (window.top !== window.self) { window.top.location = window.self.location; }
+  } catch (e) {
+    console.warn("Frame-busting blocked:", e);
+  }
 
   const prefersReduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -12,6 +19,10 @@
 
   if (copyBtn && cloneCmd) {
     copyBtn.addEventListener("click", async () => {
+      // A second click while still showing "Copied" would otherwise cache
+      // "Copied" itself as `old`, so the pending timeout later restored the
+      // label to "Copied" instead of the real original text — stuck until reload.
+      if (copyBtn.classList.contains("copied")) return;
       const text = cloneCmd.textContent.trim();
       try {
         await navigator.clipboard.writeText(text);
