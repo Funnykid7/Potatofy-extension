@@ -56,6 +56,7 @@ const PRIVILEGED_MESSAGE_TYPES = new Set([
 ]);
 
 const MAX_WHITELIST = 199; // base + 199 = 10199, last id inside [10000, 10200)
+const MAX_POTATO_SITES = 199; // BUG-105 — mirror the whitelist's bound; potatoSites had no cap
 
 // ---------- Constants ----------
 
@@ -117,14 +118,20 @@ function isHostWhitelisted(hostname, whitelist) {
 function killersForHost(hostname, killerMap) {
   if (!killerMap) return [];
   const host = normalizeHost(hostname);
-  const out = [];
+  // BUG-2 — pick only the single most-specific (longest) matching pattern instead
+  // of concatenating every ancestor match, so e.g. m.youtube.com no longer also
+  // inherits youtube.com's (desktop) selectors, and old.reddit.com no longer
+  // inherits reddit.com's.
+  let bestLen = -1;
+  let bestSelectors = null;
   for (const [pattern, selectors] of Object.entries(killerMap)) {
     const p = normalizeHost(pattern);
-    if (host === p || host.endsWith('.' + p)) {
-      if (Array.isArray(selectors)) out.push(...selectors);
+    if ((host === p || host.endsWith('.' + p)) && p.length > bestLen) {
+      bestLen = p.length;
+      bestSelectors = selectors;
     }
   }
-  return out;
+  return Array.isArray(bestSelectors) ? bestSelectors.slice() : [];
 }
 
 // 1.1.3 — synchronous detail builder. Used by both buildContentDetail (which
@@ -189,7 +196,12 @@ async function broadcastSettingsUpdate() {
     let hostname = '';
     try { hostname = new URL(tab.url).hostname; } catch (e) { continue; }
     const detail = buildContentDetailFromCache(hostname, settings, killerMap);
-    sends.push(chrome.tabs.sendMessage(tab.id, { type: 'POTATOFY_SETTINGS_UPDATE', detail }));
+    // BUG-14 — restrict to the top-level frame (frameId 0). chrome.tabs.sendMessage
+    // with no frameId delivers to every frame in the tab, so a `detail` computed
+    // from the top-level tab.url would overwrite a cross-origin iframe's own
+    // correctly host-scoped settings (set via GET_CONTENT_SETTINGS at frame init)
+    // with the wrong domain's whitelist/killer state.
+    sends.push(chrome.tabs.sendMessage(tab.id, { type: 'POTATOFY_SETTINGS_UPDATE', detail }, { frameId: 0 }));
   }
   await Promise.allSettled(sends);
 }
@@ -248,7 +260,22 @@ async function saveSettingsLocked(settings) {
       delete syncPayload.whitelist;
       delete syncPayload.potatoSites;
     }
-    try { await chrome.storage.sync.set({ settings: syncPayload }); } catch (e) {}
+    // 1.1.3 — chrome.storage.sync enforces an 8KB-per-item quota. A large
+    // whitelist/potatoSites payload can silently exceed it; detect that before
+    // writing and drop the host data (falling back to the toggles-only payload)
+    // instead of letting the whole write reject into a swallowed, invisible
+    // failure. Also log so a still-oversized payload's failure isn't silent.
+    const quota = chrome.storage.sync.QUOTA_BYTES_PER_ITEM || 8192;
+    if (JSON.stringify(syncPayload).length > quota && (syncPayload.whitelist || syncPayload.potatoSites)) {
+      console.warn('[Potatofy] cloud sync payload exceeds quota; omitting host data');
+      delete syncPayload.whitelist;
+      delete syncPayload.potatoSites;
+    }
+    try {
+      await chrome.storage.sync.set({ settings: syncPayload });
+    } catch (e) {
+      console.warn('[Potatofy] cloud sync write failed:', e && e.message ? e.message : e);
+    }
   } else {
     // useCloudSync off entirely — wipe the sync area so nothing lives on
     // Google's servers. Opting out IS the consent; no confirmation prompt.
@@ -325,6 +352,7 @@ function validateSettings(raw) {
   ) {
     const sites = Object.create(null);
     for (const [k, v] of Object.entries(raw.potatoSites)) {
+      if (Object.keys(sites).length >= MAX_POTATO_SITES) break;
       if (isValidInitiatorDomain(k) && v && typeof v === 'object' && !Array.isArray(v)) {
         sites[k] = { js: !!v.js, img: !!v.img };
       }
@@ -491,7 +519,11 @@ async function flushStatsHotToLocal() {
       console.warn('[Potatofy] stats flush failed:', e && e.message ? e.message : e);
       return;
     }
-    for (const k of Object.keys(flushed)) statsHot[k] = 0;
+    // Subtract exactly what was just persisted rather than zeroing outright —
+    // bufferIncrement() isn't gated by this lock and can add to statsHot[k]
+    // during the storage.local.set await above; an unconditional zero would
+    // wipe out that concurrent increment without it ever being written.
+    for (const k of Object.keys(flushed)) statsHot[k] = Math.max(0, (statsHot[k] || 0) - flushed[k]);
     try { await chrome.storage.session.set({ statsHot }); } catch (e) {}
     updateBadge();
   });
@@ -518,6 +550,10 @@ const CALIB_CATEGORIES = ['trackers', 'fonts', 'scripts', 'images'];
 const CALIB_MAX = 100;
 const calibHistory = { trackers: [], fonts: [], scripts: [], images: [] };
 let calibDirty = false;
+// Bumped on every recordCalibration() call that sets calibDirty; lets
+// flushCalibration() detect whether a new sample arrived while its write
+// was in flight, so it doesn't clear calibDirty out from under that sample.
+let calibVersion = 0;
 
 async function rehydrateCalibration() {
   try {
@@ -547,7 +583,7 @@ function recordCalibration(data) {
       changed = true;
     }
   }
-  if (changed) calibDirty = true;
+  if (changed) { calibDirty = true; calibVersion++; }
 }
 
 function computeCalibration() {
@@ -564,13 +600,16 @@ function computeCalibration() {
 
 async function flushCalibration() {
   if (!calibDirty) return;
+  const versionAtStart = calibVersion;
   try {
     await chrome.storage.local.set({
       calibrationHistory: { ...calibHistory },
       calibratedBandwidth: computeCalibration()
     });
-    calibDirty = false; // only clear after the write succeeds, so a failed
-                         // flush is retried on the next alarm instead of lost
+    // Only clear calibDirty if no new sample arrived (via recordCalibration)
+    // while the write above was in flight — otherwise that sample's dirty
+    // flag would be wiped even though it wasn't included in this write.
+    if (calibVersion === versionAtStart) calibDirty = false;
   } catch (e) {
     console.warn('[Potatofy] calibration flush failed:', e && e.message ? e.message : e);
   }
@@ -668,7 +707,8 @@ function updateBadge() {
         (stats.session.blockedFonts || 0) +
         (stats.session.tabsDiscarded || 0) +
         (stats.session.thirdPartyScriptsBlocked || 0) +
-        (stats.session.thirdPartyImagesBlocked || 0);
+        (stats.session.thirdPartyImagesBlocked || 0) +
+        (stats.session.mediaBlocked || 0);
       await chrome.action.setBadgeBackgroundColor({ color: '#4caf50' });
       await chrome.action.setBadgeText({ text: total > 0 ? abbreviateCount(total) : '' });
     } catch (e) {
@@ -787,6 +827,7 @@ function inManagedRange(id) {
 // this function and its caller operating on different settings snapshots
 // within the same lock.
 async function syncDynamicRulesLocked(settings) {
+  let ok = true;
   {
     const existing = await chrome.declarativeNetRequest.getDynamicRules();
     // Only touch IDs we own. Boost rules (30000+) are managed separately and
@@ -817,7 +858,7 @@ async function syncDynamicRulesLocked(settings) {
 
     try {
       await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds, addRules });
-      return;
+      return true;
     } catch (e) {
       console.warn('[Potatofy] bulk dynamic-rules update failed, retrying per-rule:', e);
     }
@@ -829,7 +870,7 @@ async function syncDynamicRulesLocked(settings) {
       // lock sync up until the next SW restart.
       for (const id of removeRuleIds) {
         try { await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [id], addRules: [] }); }
-        catch (e2) { console.warn('[Potatofy] failed to remove stale rule:', id, e2); }
+        catch (e2) { console.warn('[Potatofy] failed to remove stale rule:', id, e2); ok = false; }
       }
     }
     for (const rule of addRules) {
@@ -842,10 +883,12 @@ async function syncDynamicRulesLocked(settings) {
           await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: [rule.id], addRules: [rule] });
         } catch (e2) {
           console.warn('[Potatofy] skipping invalid rule:', rule.id, e2);
+          ok = false;
         }
       }
     }
   }
+  return ok;
 }
 
 // ---------- Static rulesets ----------
@@ -862,15 +905,17 @@ async function reconcileStaticRulesets(settings) {
       enableRulesetIds: enableIds,
       disableRulesetIds: disableIds
     });
+    return true;
   } catch (e) {
     console.warn('[Potatofy] reconcileStaticRulesets failed:', e);
+    return false;
   }
 }
 
 // ---------- contentSettings (per-site Potato Mode — R4 only, NOT used by Boost) ----------
 
 async function syncPotatoSites() {
-  if (!chrome.contentSettings) return;
+  if (!chrome.contentSettings) return true;
   // QA-05 — reconcile from scratch: clear ALL of the extension's own
   // contentSettings overrides, then write ONLY active 'block' rules. The old code
   // wrote 'allow' for non-blocked sites, which overrode the user's own global
@@ -898,7 +943,8 @@ async function syncPotatoSites() {
       }
     }
   }
-  await Promise.allSettled(jobs);
+  const results = await Promise.allSettled(jobs);
+  return !results.some(r => r.status === 'rejected');
 }
 
 async function setPotatoSite(host, opts) {
@@ -1081,7 +1127,7 @@ async function boostTab(tabId, host) {
     }
 
     const prev = boostedTabs.get(tabId);
-    let ids, evictedIds, reusedPrev = false;
+    let ids, evictedIds;
     if (prev && Array.isArray(prev.ruleIds) && prev.ruleIds.length === 3) {
       // Re-boosting an already-boosted tab: reuse its existing rule IDs
       // instead of allocating a new triplet. nextBoostRuleIds() treats the
@@ -1091,15 +1137,16 @@ async function boostTab(tabId, host) {
       // didn't need a new slot at all.
       ids = prev.ruleIds;
       evictedIds = [];
-      reusedPrev = true;
     } else {
       ({ ids, evictedIds } = nextBoostRuleIds());
     }
     const [imgId, scriptId, mediaId] = ids;
-    // Remove the previous boost for this tab (only if we actually allocated a
-    // different triplet) + anything evicted from the ring.
+    // Remove the previous boost for this tab (including the reused-IDs case —
+    // updateSessionRules processes removals before adds, so folding the same
+    // IDs into removeRuleIds is required even when re-adding them, matching
+    // every other rule-install path in this file) + anything evicted from the ring.
     const removeRuleIds = [
-      ...(prev && !reusedPrev ? prev.ruleIds : []),
+      ...(prev ? prev.ruleIds : []),
       ...evictedIds
     ];
     const addRules = [
@@ -1207,7 +1254,11 @@ async function discardEligibleTabsLocked({ minIdleMs = 0 } = {}) {
 
   const candidates = [];
   for (const win of windows) {
-    const activeTab = (win.tabs || []).find(t => t.active);
+    // BUG-1 — only the FOCUSED window's active tab is exempt from discard. Every
+    // window has its own 'active' tab regardless of window focus, so without this
+    // check the active tab of every background/minimized window was permanently
+    // protected from discard too.
+    const activeTab = win.focused ? (win.tabs || []).find(t => t.active) : null;
     const activeId = activeTab ? activeTab.id : -1;
     for (const tab of (win.tabs || [])) {
       if (shouldSkipTabForDiscard(tab, activeId)) continue;
@@ -1290,11 +1341,13 @@ async function checkIdleTabs() {
 async function getDeviceCapacityMB() {
   try {
     const s = await chrome.storage.session.get('deviceCapacityMB');
-    if (s.deviceCapacityMB) return s.deviceCapacityMB;
+    // BUG-32 — use a presence check, not a truthiness check, so a legitimately
+    // cached 0 is treated as cached rather than re-queried every call.
+    if (typeof s.deviceCapacityMB === 'number') return s.deviceCapacityMB || null;
     if (!chrome.system || !chrome.system.memory) return null;
     const info = await chrome.system.memory.getInfo();
     const cap = Math.round((info.capacity || 0) / (1024 * 1024));
-    if (cap > 0) await chrome.storage.session.set({ deviceCapacityMB: cap });
+    await chrome.storage.session.set({ deviceCapacityMB: cap });
     return cap || null;
   } catch (e) {
     return null;
@@ -1529,7 +1582,13 @@ chrome.tabs.onActivated.addListener((activeInfo) => {
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === 'loading') {
-    updateTabActivity(tabId);
+    // BUG-107 — only treat a load as user activity if the tab is actually
+    // focused; otherwise a self-reloading background tab (meta-refresh,
+    // polling dashboard) keeps resetting tabLastActive forever and is never
+    // considered idle for discard.
+    chrome.tabs.get(tabId).then(tab => {
+      if (tab && tab.active) updateTabActivity(tabId);
+    }).catch(e => {});
   }
   // Auto-clear boost when the user navigates the tab to a different host.
   if (changeInfo.url) {
@@ -1601,12 +1660,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         await saveSettings(settings);
         // H-5 / M-8 — reconcile + dynamic-rule sync + per-site sync under a single
         // dnr lock so concurrent UPDATE_SETTINGS / boost installs can't interleave.
+        // BUG-104 — capture each helper's success so a real DNR/contentSettings
+        // failure surfaces as ok:false instead of always reporting success once
+        // settings were merely persisted.
+        let rulesOk = true;
         await withLock('dnr', async () => {
-          await reconcileStaticRulesets(settings);
-          await syncDynamicRulesLocked(settings);
-          await syncPotatoSites();
+          const staticOk = await reconcileStaticRulesets(settings);
+          const dynamicOk = await syncDynamicRulesLocked(settings);
+          const potatoOk = await syncPotatoSites();
+          rulesOk = staticOk && dynamicOk && potatoOk;
         });
-        sendResponse({ ok: true });
+        sendResponse({ ok: rulesOk });
       } catch (e) {
         console.warn('[Potatofy] UPDATE_SETTINGS failed:', e);
         sendResponse({ ok: false });

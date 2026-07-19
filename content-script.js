@@ -8,7 +8,6 @@
   // These bindings are the ISOLATED world's own globals; the page cannot reach or
   // override them, so they stay native for our internal use regardless of the page.
   const _setTimeout = window.setTimeout.bind(window);
-  const _requestIdleCallback = (window.requestIdleCallback || function (cb) { return _setTimeout(cb, 1); }).bind(window);
   const _setInterval = window.setInterval.bind(window);
 
   // 1.1.1: only the top frame reports stats. Content scripts run per-frame
@@ -115,15 +114,20 @@
     statBuffer[key] = (statBuffer[key] || 0) + n;
     if (statFlushTimer) return;
     statFlushTimer = _setTimeout(() => {
-      statFlushTimer = null;
       const patch = {};
       for (const k of Object.keys(statBuffer)) {
         const v = statBuffer[k];
-        statBuffer[k] = 0;
         if (Number.isFinite(v) && v > 0) patch[k] = Math.min(Math.floor(v), MAX_INCREMENT);
       }
-      if (Object.keys(patch).length === 0) return;
-      chrome.runtime.sendMessage({ type: 'STATS_INCREMENT', patch }).catch(() => {});
+      if (Object.keys(patch).length === 0) { statFlushTimer = null; return; }
+      // Only subtract the sent amounts once the send actually lands — zeroing
+      // unconditionally beforehand dropped the whole batch for good whenever
+      // the SW was unreachable, instead of letting it ride to the next flush.
+      // The guard stays held (statFlushTimer non-null) until the send settles
+      // so a slow send can't overlap with a second flush reading stale counts.
+      chrome.runtime.sendMessage({ type: 'STATS_INCREMENT', patch }).then(() => {
+        for (const k of Object.keys(patch)) statBuffer[k] -= patch[k];
+      }).catch(() => {}).finally(() => { statFlushTimer = null; });
     }, 1000);
   }
 
@@ -238,6 +242,11 @@
   function pauseVideoNode(el) {
     if (!el || el.tagName !== 'VIDEO') return false;
     try {
+      // Bug 6 — never pause a video the user has put into Picture-in-Picture;
+      // they switched tabs specifically to keep watching it out-of-tab.
+      if (document.pictureInPictureElement === el || el.webkitPresentationMode === 'picture-in-picture') {
+        return false;
+      }
       // REMAINING-1 — use the WeakSet as the idempotency guard, not POTATO_PAUSED_KEY.
       // When the video isn't currently playing (wasPlaying=false), the old code skipped
       // setting POTATO_PAUSED_KEY, so a second call to pauseVideoNode on the same element
@@ -517,23 +526,41 @@
   function deepQueryAll(root, selector, out) {
     out = out || [];
     if (!root || !root.children) return out;
-    for (const el of root.children) {
+    // Iterative (explicit stack) instead of recursive: recursion depth here
+    // tracked DOM nesting depth 1:1 with no cap, so a pathologically deep
+    // tree (tens of thousands of nested elements) could exhaust the JS call
+    // stack. The stack array lives on the heap and has no such limit.
+    const stack = [{ children: root.children, i: 0 }];
+    while (stack.length) {
+      const frame = stack[stack.length - 1];
+      if (frame.i >= frame.children.length) { stack.pop(); continue; }
+      const el = frame.children[frame.i++];
       if (typeof el.matches === 'function' && el.matches(selector)) out.push(el);
-      if (el.shadowRoot) deepQueryAll(el.shadowRoot, selector, out);
-      if (el.children && el.children.length) deepQueryAll(el, selector, out);
+      if (el.children && el.children.length) stack.push({ children: el.children, i: 0 });
+      if (el.shadowRoot) stack.push({ children: el.shadowRoot.children, i: 0 });
     }
     return out;
   }
 
   // ---------- Image lite (B1: restore srcset on toggle-off) ----------
 
-  const processedImages = new WeakSet();
+  // Bug 3 — split the single shared "processed" marker into one per feature.
+  // A shared marker meant an element touched only by imageLazyEnabled could
+  // never be reprocessed by applyImageLazyAll once imageLowQualityEnabled was
+  // later also enabled (it was already "processed", so it got skipped before
+  // lazifyImage ever ran the srcset-stripping branch for it).
+  const processedImagesLazy = new WeakSet();     // imageLazyEnabled attrs applied
+  const processedImagesQuality = new WeakSet();  // imageLowQualityEnabled srcset stripped
   // Stores { srcset, sizes } captured before stripping so we can restore the
   // original quality if the user disables imageLowQualityEnabled mid-session.
   const imageOriginalSrcset = new WeakMap();
   // Tracks <img> elements where we synthesized a fallback `src` (see below)
   // so restoreImageQuality() can remove it again rather than leaving it stuck.
   const injectedFallbackSrc = new WeakSet();
+  // Bug 28 — tracks which loading/decoding/fetchpriority attributes Potatofy
+  // itself added (as opposed to ones already present on the element) so
+  // restoreImageLazyAttrs() can remove exactly those again on toggle-off.
+  const injectedLazyAttrs = new WeakMap();
 
   // Picks the smallest candidate URL out of a srcset string, used as a `src`
   // fallback for <img> elements that rely solely on srcset (valid, common
@@ -565,9 +592,12 @@
     try {
       let changed = false;
       if (settings.imageLazyEnabled) {
-        if ((tag === 'IMG' || tag === 'IFRAME') && !el.hasAttribute('loading')) { el.setAttribute('loading', 'lazy'); changed = true; }
-        if (tag === 'IMG' && !el.hasAttribute('decoding')) { el.setAttribute('decoding', 'async'); changed = true; }
-        if (tag === 'IMG' && !el.hasAttribute('fetchpriority')) { el.setAttribute('fetchpriority', 'low'); changed = true; }
+        const added = injectedLazyAttrs.get(el) || [];
+        if ((tag === 'IMG' || tag === 'IFRAME') && !el.hasAttribute('loading')) { el.setAttribute('loading', 'lazy'); added.push('loading'); changed = true; }
+        if (tag === 'IMG' && !el.hasAttribute('decoding')) { el.setAttribute('decoding', 'async'); added.push('decoding'); changed = true; }
+        if (tag === 'IMG' && !el.hasAttribute('fetchpriority')) { el.setAttribute('fetchpriority', 'low'); added.push('fetchpriority'); changed = true; }
+        if (added.length) injectedLazyAttrs.set(el, added);
+        processedImagesLazy.add(el);
       }
       if (settings.imageLowQualityEnabled && (tag === 'IMG' || tag === 'SOURCE') && el.hasAttribute('srcset')) {
         if (!imageOriginalSrcset.has(el)) {
@@ -586,8 +616,8 @@
         el.removeAttribute('srcset');
         el.removeAttribute('sizes');
         changed = true;
+        processedImagesQuality.add(el);
       }
-      processedImages.add(el);
       return changed;
     } catch (e) { return false; }
   }
@@ -597,7 +627,12 @@
     let count = 0;
     const nodes = deepQueryAll(root, 'img, iframe, source');
     for (const n of nodes) {
-      if (processedImages.has(n)) continue;
+      // Bug 3 — only skip a node once it's been processed under BOTH of the
+      // currently-enabled features; a node marked done for one feature must
+      // still fall through to lazifyImage when the other feature is newly on.
+      const lazyDone = !settings.imageLazyEnabled || processedImagesLazy.has(n);
+      const qualityDone = !settings.imageLowQualityEnabled || processedImagesQuality.has(n);
+      if (lazyDone && qualityDone) continue;
       if (lazifyImage(n)) count++;
     }
     if (count) reportStat('imagesLazied', count);
@@ -619,12 +654,28 @@
         } catch (e) {}
         imageOriginalSrcset.delete(n);
       }
-      // processedImages is shared between imageLazyEnabled and
-      // imageLowQualityEnabled as a cheap "already looked at this element"
-      // skip in applyImageLazyAll. Without clearing it here, an image
-      // touched once by either feature could never be re-processed by
-      // either feature again for the rest of the page's life.
-      processedImages.delete(n);
+      // Clear the quality-specific marker so a later re-enable of
+      // imageLowQualityEnabled reprocesses this element instead of being
+      // skipped by applyImageLazyAll's per-feature "already done" check.
+      processedImagesQuality.delete(n);
+    }
+  }
+
+  function restoreImageLazyAttrs() {
+    // Bug 28 — loading/decoding/fetchpriority set by lazifyImage() were never
+    // removed on toggle-off. Only remove attributes Potatofy itself injected
+    // (tracked in injectedLazyAttrs); attributes the page already had are
+    // left untouched.
+    const nodes = deepQueryAll(document, 'img, iframe');
+    for (const n of nodes) {
+      const added = injectedLazyAttrs.get(n);
+      if (added) {
+        try {
+          for (const attr of added) n.removeAttribute(attr);
+        } catch (e) {}
+        injectedLazyAttrs.delete(n);
+      }
+      processedImagesLazy.delete(n);
     }
   }
 
@@ -705,11 +756,10 @@
   const OBSERVER_DISCONNECT_AFTER = 600; // ~5 min of idle ticks
 
   // H-3 — `snap` is a snapshot of the relevant feature flags captured at
-  // MutationObserver-callback time. The actual node processing runs later in a
-  // requestIdleCallback tick; reading the live `settings` object there would
-  // let a POTATOFY_SETTINGS_UPDATE arriving in between flip behavior mid-batch
-  // (e.g. lazify nodes after the feature was just disabled). Using the frozen
-  // snapshot keeps each batch consistent with the settings at observation time.
+  // MutationObserver-callback time and passed straight into processMutations
+  // (BUG-49/30 — no longer deferred via requestIdleCallback; see startObserver).
+  // Using a frozen snapshot rather than reading live `settings` keeps each
+  // batch internally consistent even though it's processed synchronously.
   function processMutations(mutations, snap) {
     let relevant = false;
     for (const m of mutations) {
@@ -765,9 +815,9 @@
           }
         }
         // QA-13 — read live isHidden() here, NOT the snapshotted snap.hidden.
-        // This callback runs in a deferred requestIdleCallback tick that can fire
-        // AFTER the tab became visible again; the stale snapshot would otherwise
-        // pause freshly-inserted videos on a now-foreground tab.
+        // The observer callback can still be delivered slightly after a
+        // visibility flip; the stale snapshot would otherwise pause
+        // freshly-inserted videos on a now-foreground tab.
         if (snap.videoPauseEnabled && isHidden()) {
           if (tag === 'VIDEO') {
             if (pauseVideoNode(node)) reportStat('videosPaused', 1);
@@ -776,8 +826,9 @@
           }
         }
         if (snap.videoPreloadNoneEnabled) {
-          if (tag === 'VIDEO') applyVideoPreloadNone(node);
-          else if (hasKids) applyVideoPreloadNoneAll(node);
+          if (tag === 'VIDEO') {
+            if (applyVideoPreloadNone(node)) reportStat('videosPreloadNoned', 1);
+          } else if (hasKids) applyVideoPreloadNoneAll(node);
         }
         if (snap.autoplayKillEnabled) {
           if (tag === 'VIDEO' || tag === 'AUDIO') {
@@ -796,14 +847,25 @@
   }
 
   function startObserver() {
+    // BUG-10 — reset before the early return so a startObserver() call while
+    // an observer is already attached (repeated applyAll() from a settings
+    // update, or a visibilitychange firing while already observing) still
+    // refreshes the idle counter instead of leaving it to accumulate toward
+    // OBSERVER_DISCONNECT_AFTER from its prior value.
+    observerIdleCount = 0;
     if (observer) return;
     const target = document.body || document.documentElement;
     if (!target) return;
-    observerIdleCount = 0;
     observer = new MutationObserver((mutations) => {
-      // Snapshot feature flags now, before the deferred tick (H-3). Visibility is
-      // intentionally NOT snapshotted — processMutations reads isHidden() live so a
-      // tick that fires after the tab is shown again can't act on stale state (QA-13).
+      // BUG-49/30 — process synchronously right here instead of deferring via
+      // requestIdleCallback (up to 500ms). The deferral widened the window
+      // during which a newly-inserted element (prefetch link, autoplay video,
+      // eager img fetch) could dispatch its network request before mitigation
+      // ran, and it let a stale `snap` re-apply a since-disabled feature if
+      // settings changed (and applyAll() cleanup ran) during the deferred wait.
+      // Visibility is intentionally NOT snapshotted — processMutations reads
+      // isHidden() live so a callback delivered after the tab is shown again
+      // can't act on stale state (QA-13).
       const snap = {
         imageLazyEnabled:        settings.imageLazyEnabled,
         imageLowQualityEnabled:  settings.imageLowQualityEnabled,
@@ -812,7 +874,7 @@
         videoPreloadNoneEnabled: settings.videoPreloadNoneEnabled,
         autoplayKillEnabled:     settings.autoplayKillEnabled
       };
-      _requestIdleCallback(() => processMutations(mutations, snap), { timeout: 500 });
+      processMutations(mutations, snap);
     });
     observer.observe(target, {
       childList: true,
@@ -856,6 +918,7 @@
 
     if (!anyFeatureEnabled()) {
       restoreImageQuality();
+      restoreImageLazyAttrs();
       restoreVideoPlayability(document);
       removeAnimationKill();
       removeSiteKillers();
@@ -874,6 +937,7 @@
     // avoid the apply-then-immediately-restore churn that ran every applyAll.
     if (settings.imageLazyEnabled || settings.imageLowQualityEnabled) applyImageLazyAll(document);
     if (!settings.imageLowQualityEnabled) restoreImageQuality();
+    if (!settings.imageLazyEnabled) restoreImageLazyAttrs();
     if (settings.prefetchStripEnabled) applyPrefetchStripAll(document);
     if (settings.autoplayKillEnabled) killAutoplayAll(document);
 
@@ -907,24 +971,34 @@
 
   // ---------- chrome.runtime channel (1.1.2 — replaces CustomEvent bus) ----------
 
+  // Bug 31 — true while init()'s GET_CONTENT_SETTINGS request is still in
+  // flight. If a live POTATOFY_SETTINGS_UPDATE arrives and is applied before
+  // that request resolves, it clears this flag so init()'s later-resolving
+  // (and now-stale) reply is discarded instead of overwriting the fresher
+  // live settings.
+  let pendingInitRequest = true;
+
   async function init() {
     try {
       const reply = await chrome.runtime.sendMessage({
         type: 'GET_CONTENT_SETTINGS',
         host: location.hostname
       });
-      if (reply && reply.ok && reply.detail) {
+      if (reply && reply.ok && reply.detail && pendingInitRequest) {
         ingestDetail(reply.detail);
         applyAll();
       }
     } catch (e) {
       // SW unreachable (e.g. install/uninstall race). Page runs with defaults.
+    } finally {
+      pendingInitRequest = false;
     }
   }
 
   chrome.runtime.onMessage.addListener((msg) => {
     if (!msg || msg.type !== 'POTATOFY_SETTINGS_UPDATE') return;
     if (!msg.detail) return;
+    pendingInitRequest = false;
     ingestDetail(msg.detail);
     applyAll();
   });
@@ -955,10 +1029,14 @@
     try {
       const observer = new PerformanceObserver((list) => {
         for (const entry of list.getEntries()) {
-          if (entry.transferSize === 0) continue; // Cached, skip
           const url = entry.name;
+          // Bug 72 — the old `if (entry.transferSize === 0) continue;` guard
+          // ran BEFORE this decodedBodySize fallback could ever be reached,
+          // so any 0-transferSize entry (e.g. a disk-cache hit, which still
+          // reports a real decodedBodySize) was dropped even though a valid
+          // size was available right here.
           const size = entry.transferSize || entry.decodedBodySize || 0;
-          if (size === 0) continue;
+          if (size === 0) continue; // no size available at all — skip
 
           let hostname = '', pathname = '';
           try {

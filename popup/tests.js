@@ -92,6 +92,37 @@ function expect(actual) {
   };
 }
 
+// ---------- Cleanup safety net ----------
+// MV3 popups are torn down almost instantly once they lose focus, which can
+// abort a suite mid-await before its try/finally block gets to restore the
+// user's real settings/whitelist/sync data. `visibilitychange` (and
+// `pagehide` as a fallback) fire in the brief window before that teardown,
+// so any suite that mutates live state registers its restore call here first
+// — if the popup is closed mid-test, this fires the pending restores as a
+// best-effort, fire-and-forget safety net instead of leaving live storage
+// permanently polluted with test artifacts.
+const pendingRestores = new Set();
+
+function withCleanupGuard(restoreFn) {
+  pendingRestores.add(restoreFn);
+  return () => { pendingRestores.delete(restoreFn); };
+}
+
+function flushPendingRestores() {
+  for (const restoreFn of pendingRestores) {
+    try {
+      const result = restoreFn();
+      if (result && typeof result.catch === 'function') result.catch(() => {});
+    } catch (e) {}
+  }
+  pendingRestores.clear();
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) flushPendingRestores();
+});
+window.addEventListener('pagehide', flushPendingRestores);
+
 // Formatters are imported at module top (shared with popup.js). The unit suites
 // below still exercise them to catch regressions in the shared module.
 
@@ -227,7 +258,7 @@ describe('computeSavings — formula consistency', () => {
     const tabDiscardHeuristic = (s.tabsDiscarded || 0) * w.tabDiscard.ramBytes;
     let expectedRam;
     if (real > 0) {
-      const tabDiscardSavings = Math.max(real, tabDiscardHeuristic);
+      const tabDiscardSavings = (s.tabsDiscarded === 1) ? real : Math.max(real, tabDiscardHeuristic);
       const estimatedBreakdown = Math.max(0, estimated - tabDiscardHeuristic) + (tabDiscardSavings - real);
       expectedRam = real + estimatedBreakdown;
     } else {
@@ -347,8 +378,12 @@ describe('Boost — tab-ephemeral (1.1.1)', () => {
 describe('Settings persistence (local — 1.1.0 R9)', () => {
   it('storage.local change propagates to GET_SETTINGS', async () => {
     const original = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
+    const restore = () => chrome.storage.local.set({ settings: original });
     // try/finally so a failed assertion still restores the user's real
     // settings instead of leaving prefetchStripEnabled permanently flipped.
+    // `restore` is also registered as an unload-safety net (see "Cleanup
+    // safety net" above) in case the popup closes before finally runs.
+    const unguard = withCleanupGuard(restore);
     try {
       const flipped = !original.prefetchStripEnabled;
       const updated = { ...original, prefetchStripEnabled: flipped };
@@ -356,7 +391,8 @@ describe('Settings persistence (local — 1.1.0 R9)', () => {
       const readBack = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
       expect(readBack.prefetchStripEnabled).toBe(flipped);
     } finally {
-      await chrome.storage.local.set({ settings: original });
+      unguard();
+      await restore();
     }
   });
 });
@@ -368,13 +404,16 @@ describe('Whitelist storage', () => {
     // guarantees cleanup even if the assertion throws.
     const TEST_HOST = 'pttf-test.example';
     const original = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
+    const restore = () => chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
+    const unguard = withCleanupGuard(restore);
     try {
       const withHost = { ...original, whitelist: [...(original.whitelist || []), TEST_HOST] };
       await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: withHost });
       const readBack = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
       expect(readBack.whitelist.includes(TEST_HOST)).toBeTruthy();
     } finally {
-      await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
+      unguard();
+      await restore();
     }
   });
 });
@@ -396,6 +435,8 @@ describe('UPDATE_SETTINGS validation (1.1.2 A4)', () => {
   // user's real settings stuck in the synthetic test state.
   it('non-array whitelist coerces to empty array', async () => {
     const original = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
+    const restore = () => chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
+    const unguard = withCleanupGuard(restore);
     try {
       await chrome.runtime.sendMessage({
         type: 'UPDATE_SETTINGS',
@@ -404,11 +445,14 @@ describe('UPDATE_SETTINGS validation (1.1.2 A4)', () => {
       const readBack = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
       expect(Array.isArray(readBack.whitelist)).toBeTruthy();
     } finally {
-      await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
+      unguard();
+      await restore();
     }
   });
   it('non-boolean toggle rejected, default preserved', async () => {
     const original = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
+    const restore = () => chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
+    const unguard = withCleanupGuard(restore);
     try {
       await chrome.runtime.sendMessage({
         type: 'UPDATE_SETTINGS',
@@ -417,11 +461,14 @@ describe('UPDATE_SETTINGS validation (1.1.2 A4)', () => {
       const readBack = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
       expect(typeof readBack.blockingEnabled).toBe('boolean');
     } finally {
-      await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
+      unguard();
+      await restore();
     }
   });
   it('out-of-range idleThresholdMinutes falls back to default', async () => {
     const original = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
+    const restore = () => chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
+    const unguard = withCleanupGuard(restore);
     try {
       await chrome.runtime.sendMessage({
         type: 'UPDATE_SETTINGS',
@@ -431,7 +478,8 @@ describe('UPDATE_SETTINGS validation (1.1.2 A4)', () => {
       // 999 is not in ALLOWED_THRESHOLDS so the default (5) must be used.
       expect(readBack.idleThresholdMinutes).toBe(5);
     } finally {
-      await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
+      unguard();
+      await restore();
     }
   });
 });
@@ -452,9 +500,11 @@ describe('GET_CONTENT_SETTINGS (1.1.2 A1)', () => {
   });
   it('whitelisted host returns siteKillers: [] and all feature flags false', async () => {
     const original = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
+    const restore = () => chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
     // try/finally — without it, a throwing GET_CONTENT_SETTINGS call skipped
     // the UPDATE_SETTINGS(original) cleanup and left TEST_HOST permanently
     // whitelisted for the rest of the session.
+    const unguard = withCleanupGuard(restore);
     try {
       const withHost = { ...original, whitelist: [...(original.whitelist || []), TEST_HOST] };
       await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: withHost });
@@ -465,7 +515,8 @@ describe('GET_CONTENT_SETTINGS (1.1.2 A1)', () => {
       expect(reply.detail.jsThrottleEnabled).toBe(false);
       expect(reply.detail.imageLazyEnabled).toBe(false);
     } finally {
-      await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
+      unguard();
+      await restore();
     }
   });
 });
@@ -474,6 +525,8 @@ describe('Boost reasons (1.1.2 B5)', () => {
   const TEST_HOST = 'pttf-test.example';
   it('BOOST_TAB on a whitelisted host returns reason=whitelisted', async () => {
     const original = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
+    const restore = () => chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
+    const unguard = withCleanupGuard(restore);
     try {
       const withHost = { ...original, whitelist: [...(original.whitelist || []), TEST_HOST] };
       await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: withHost });
@@ -483,7 +536,8 @@ describe('Boost reasons (1.1.2 B5)', () => {
       expect(reply.ok).toBe(false);
       expect(reply.reason).toBe('whitelisted');
     } finally {
-      await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
+      unguard();
+      await restore();
     }
   });
 });
@@ -498,6 +552,18 @@ describe('Cloud sync purge (1.1.3 B1)', () => {
     const original = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
     if (!original.useCloudSync) return;
     const syncBefore = await chrome.storage.sync.get(null);
+    const restore = async () => {
+      await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
+      // Explicitly clear before restoring — chrome.storage.sync.set() only
+      // adds/updates keys, it doesn't delete ones absent from syncBefore, so
+      // without this a test-written key that wasn't in the original snapshot
+      // could leak and persist in the user's sync storage indefinitely.
+      try { await chrome.storage.sync.clear(); } catch (e) {}
+      if (Object.keys(syncBefore).length > 0) {
+        try { await chrome.storage.sync.set(syncBefore); } catch (e) {}
+      }
+    };
+    const unguard = withCleanupGuard(restore);
     try {
       // Turn sync on, write something, then turn it off and verify it's gone.
       await chrome.runtime.sendMessage({
@@ -511,21 +577,22 @@ describe('Cloud sync purge (1.1.3 B1)', () => {
       const syncAfter = await chrome.storage.sync.get(null);
       expect(Object.keys(syncAfter).length).toBe(0);
     } finally {
-      await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
-      // Explicitly clear before restoring — chrome.storage.sync.set() only
-      // adds/updates keys, it doesn't delete ones absent from syncBefore, so
-      // without this a test-written key that wasn't in the original snapshot
-      // could leak and persist in the user's sync storage indefinitely.
-      try { await chrome.storage.sync.clear(); } catch (e) {}
-      if (Object.keys(syncBefore).length > 0) {
-        try { await chrome.storage.sync.set(syncBefore); } catch (e) {}
-      }
+      unguard();
+      await restore();
     }
   });
   it('toggling syncHostsToCloud off strips host fields from sync', async () => {
     const original = (await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' })).settings;
     if (!original.useCloudSync) return;
     const syncBefore = await chrome.storage.sync.get(null);
+    const restore = async () => {
+      await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
+      try { await chrome.storage.sync.clear(); } catch (e) {}
+      if (Object.keys(syncBefore).length > 0) {
+        try { await chrome.storage.sync.set(syncBefore); } catch (e) {}
+      }
+    };
+    const unguard = withCleanupGuard(restore);
     try {
       const TEST_HOST = 'pttf-sync-test.example';
       await chrome.runtime.sendMessage({
@@ -542,11 +609,8 @@ describe('Cloud sync purge (1.1.3 B1)', () => {
       const haveWl = syncAfter.settings && Array.isArray(syncAfter.settings.whitelist);
       expect(!haveWl).toBeTruthy();
     } finally {
-      await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: original });
-      try { await chrome.storage.sync.clear(); } catch (e) {}
-      if (Object.keys(syncBefore).length > 0) {
-        try { await chrome.storage.sync.set(syncBefore); } catch (e) {}
-      }
+      unguard();
+      await restore();
     }
   });
 });

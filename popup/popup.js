@@ -743,9 +743,25 @@ function renderTestResults({ passed, failed, total, results }) {
 }
 
 function bindDiagnosticsBtn() {
+  let diagnosticsRunning = false;
+  let preDiagnosticsSettings = null;
+
+  // An MV3 popup document is torn down the instant it loses focus, killing
+  // any in-flight JS -- including the try/finally cleanup blocks inside the
+  // diagnostics runner that restore settings mutated during a test. Best-effort
+  // restore the pre-run snapshot here so a popup closed mid-run doesn't leave
+  // the user's real settings stuck in a synthetic test state.
+  window.addEventListener('pagehide', () => {
+    if (diagnosticsRunning && preDiagnosticsSettings) {
+      chrome.storage.local.set({ settings: preDiagnosticsSettings }).catch(() => {});
+    }
+  });
+
   els.runTestsBtn.addEventListener('click', async () => {
     els.runTestsBtn.disabled = true;
     els.runTestsBtn.textContent = 'Running…';
+    diagnosticsRunning = true;
+    preDiagnosticsSettings = structuredClone(currentSettings);
     try {
       const tests = window.__potatofyTests;
       if (!tests || typeof tests.run !== 'function') {
@@ -761,6 +777,8 @@ function bindDiagnosticsBtn() {
       els.testResults.appendChild(summary);
       els.testResults.classList.remove('hidden');
     }
+    diagnosticsRunning = false;
+    preDiagnosticsSettings = null;
     els.runTestsBtn.textContent = 'Run Diagnostics';
     els.runTestsBtn.disabled = false;
   });

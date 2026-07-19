@@ -26,6 +26,26 @@
   const _requestIdleCallback   = (window.requestIdleCallback || function (cb) { return _setTimeout(cb, 1); }).bind(window);
   const _cancelIdleCallback    = (window.cancelIdleCallback  || function () {}).bind(window);
 
+  // Native Map/Array method references, captured before any page script can
+  // pollute Map.prototype or reassign Array.from (BUG-51). All queue access
+  // below goes through these instead of calling the instance methods directly.
+  const _mapSet     = Map.prototype.set;
+  const _mapGet     = Map.prototype.get;
+  const _mapHas     = Map.prototype.has;
+  const _mapDelete  = Map.prototype.delete;
+  const _mapClear   = Map.prototype.clear;
+  const _mapKeys    = Map.prototype.keys;
+  const _mapEntries = Map.prototype.entries;
+  const _arrayFrom  = Array.from;
+  const _hasOwnProperty = Object.prototype.hasOwnProperty;
+  function mapSet(m, k, v) { return _mapSet.call(m, k, v); }
+  function mapGet(m, k) { return _mapGet.call(m, k); }
+  function mapHas(m, k) { return _mapHas.call(m, k); }
+  function mapDelete(m, k) { return _mapDelete.call(m, k); }
+  function mapClear(m) { return _mapClear.call(m); }
+  function mapKeys(m) { return _mapKeys.call(m); }
+  function mapEntries(m) { return _mapEntries.call(m); }
+
   // Discriminator for the cross-world handshake. Fixed (not randomized) because
   // both worlds must agree on it without a negotiation round-trip; the payload is
   // only a boolean so a fixed tag costs nothing in security terms.
@@ -67,7 +87,12 @@
   // during that window found nothing to cancel (the native API doesn't
   // recognize our synthetic negative ids) and the "cancelled" frame ran anyway.
   const rescheduledRaf = new Map();
-  let rafCounter = 0;
+  // Seeded at a high positive constant (disjoint from real native rAF ids,
+  // which are small increasing positive integers) and incremented, rather than
+  // starting at 0 and decrementing, so synthetic ids are never negative/zero —
+  // page code that gates on `if (rafId > 0)` before treating an id as valid
+  // no longer misbehaves on synthetic ids minted while hidden+throttled.
+  let rafCounter = 0x20000000;
   const MAX_PENDING_RAF = 240;
 
   // typeof fn === 'function' used to let legacy string-eval timers
@@ -88,10 +113,10 @@
       const callable = toCallable(fn);
       if (callable) {
         const id = ++timerSeq;
-        pendingTimers.set(id, { fn: callable, args, delay: Math.max(0, Number(delay) || 0), queuedAt: Date.now() });
+        mapSet(pendingTimers, id, { fn: callable, args, delay: Math.max(0, Number(delay) || 0), queuedAt: Date.now() });
         if (pendingTimers.size > MAX_PENDING_TIMERS) {
-          const oldest = pendingTimers.keys().next().value; // Map preserves insertion order
-          pendingTimers.delete(oldest);
+          const oldest = mapKeys(pendingTimers).next().value; // Map preserves insertion order
+          mapDelete(pendingTimers, oldest);
         }
         return id;
       }
@@ -100,10 +125,14 @@
   }
 
   function shadowedClearTimeout(id) {
-    if (pendingTimers.delete(id)) return;
-    if (rescheduledTimers.has(id)) {
-      _clearTimeout(rescheduledTimers.get(id));
-      rescheduledTimers.delete(id);
+    id = Number(id); // synthetic ids are numeric Map keys; coerce so
+                      // clearTimeout(String(id)) still finds the entry
+                      // instead of silently falling through to the native
+                      // no-op (BUG-71)
+    if (mapDelete(pendingTimers, id)) return;
+    if (mapHas(rescheduledTimers, id)) {
+      _clearTimeout(mapGet(rescheduledTimers, id));
+      mapDelete(rescheduledTimers, id);
       return;
     }
     return _clearTimeout(id);
@@ -111,11 +140,11 @@
 
   function shadowedRequestAnimationFrame(cb) {
     if (isHidden() && jsThrottleEnabled) {
-      const id = --rafCounter; // negative → can never collide with a real positive id
-      pendingRaf.set(id, cb);
+      const id = ++rafCounter; // high positive range → can never collide with a real native id
+      mapSet(pendingRaf, id, cb);
       if (pendingRaf.size > MAX_PENDING_RAF) {
-        const oldest = pendingRaf.keys().next().value;
-        pendingRaf.delete(oldest);
+        const oldest = mapKeys(pendingRaf).next().value;
+        mapDelete(pendingRaf, oldest);
       }
       return id;
     }
@@ -123,10 +152,12 @@
   }
 
   function shadowedCancelAnimationFrame(id) {
-    if (pendingRaf.delete(id)) return;
-    if (rescheduledRaf.has(id)) {
-      _cancelAnimationFrame(rescheduledRaf.get(id));
-      rescheduledRaf.delete(id);
+    id = Number(id); // see shadowedClearTimeout — coerce so a stringified id
+                      // still matches the numeric Map key (BUG-71)
+    if (mapDelete(pendingRaf, id)) return;
+    if (mapHas(rescheduledRaf, id)) {
+      _cancelAnimationFrame(mapGet(rescheduledRaf, id));
+      mapDelete(rescheduledRaf, id);
       return;
     }
     _cancelAnimationFrame(id);
@@ -135,11 +166,11 @@
   function drainPendingTimers() {
     if (pendingTimers.size === 0) return;
     const now = Date.now();
-    const ids = Array.from(pendingTimers.keys());
+    const ids = _arrayFrom(mapKeys(pendingTimers));
     for (const id of ids) {
-      const item = pendingTimers.get(id);
+      const item = mapGet(pendingTimers, id);
       if (!item) continue; // already cancelled earlier in this same loop
-      pendingTimers.delete(id); // delete BEFORE scheduling so shadowedClearTimeout
+      mapDelete(pendingTimers, id); // delete BEFORE scheduling so shadowedClearTimeout
                                  // can't find a stale entry for an id that's already
                                  // been promoted to a native reschedule
       const remaining = Math.max(0, item.delay - (now - item.queuedAt));
@@ -149,7 +180,7 @@
       // 10 seconds in) and naturally spreads a large queued batch out over
       // real time instead of bursting it all in one synchronous loop.
       const nativeId = _setTimeout(() => {
-        rescheduledTimers.delete(id);
+        mapDelete(rescheduledTimers, id);
         try {
           // Native setTimeout guarantees `this === window` inside the
           // callback; a bare `fn(...args)` call under 'use strict' would
@@ -163,21 +194,21 @@
           _setTimeout(() => { throw e; }, 0);
         }
       }, remaining);
-      rescheduledTimers.set(id, nativeId);
+      mapSet(rescheduledTimers, id, nativeId);
     }
   }
 
   function drainPendingRaf() {
     if (pendingRaf.size === 0) return;
-    const entries = Array.from(pendingRaf.entries());
-    pendingRaf.clear();
+    const entries = _arrayFrom(mapEntries(pendingRaf));
+    mapClear(pendingRaf);
     for (const [id, cb] of entries) {
       try {
         const nativeId = _requestAnimationFrame((ts) => {
-          rescheduledRaf.delete(id);
+          mapDelete(rescheduledRaf, id);
           cb(ts); // let errors surface natively — don't swallow them here
         });
-        rescheduledRaf.set(id, nativeId);
+        mapSet(rescheduledRaf, id, nativeId);
       } catch (e) {}
     }
   }
@@ -185,28 +216,46 @@
   // ---- requestIdleCallback shadowing (mirrors the setTimeout queue) ----
   // Previously entirely unshadowed: background idle-loop scripts bypassed
   // the throttle completely.
-  const pendingIdleCallbacks = new Map(); // synthetic id -> cb
+  const pendingIdleCallbacks = new Map(); // synthetic id -> { cb, opts }
   let idleSeq = ((Math.random() * 0x3FFFFFFF) | 0) + 0x60000000;
+  // synthetic id -> native id, for entries that have been drained (promoted to
+  // a real requestIdleCallback) but haven't fired yet — mirrors
+  // rescheduledTimers/rescheduledRaf so shadowedCancelIdleCallback can still
+  // cancel them through that window.
+  const rescheduledIdleCallbacks = new Map();
 
   function shadowedRequestIdleCallback(cb, opts) {
     if (isHidden() && jsThrottleEnabled && typeof cb === 'function') {
       const id = ++idleSeq;
-      pendingIdleCallbacks.set(id, cb);
+      mapSet(pendingIdleCallbacks, id, { cb, opts });
       return id;
     }
     return _requestIdleCallback(cb, opts);
   }
 
   function shadowedCancelIdleCallback(id) {
-    if (pendingIdleCallbacks.delete(id)) return;
+    if (mapDelete(pendingIdleCallbacks, id)) return;
+    if (mapHas(rescheduledIdleCallbacks, id)) {
+      _cancelIdleCallback(mapGet(rescheduledIdleCallbacks, id));
+      mapDelete(rescheduledIdleCallbacks, id);
+      return;
+    }
     return _cancelIdleCallback(id);
   }
 
   function drainPendingIdleCallbacks() {
     if (pendingIdleCallbacks.size === 0) return;
-    const snapshot = Array.from(pendingIdleCallbacks.values());
-    pendingIdleCallbacks.clear();
-    for (const cb of snapshot) { try { _requestIdleCallback(cb); } catch (e) {} }
+    const entries = _arrayFrom(mapEntries(pendingIdleCallbacks));
+    mapClear(pendingIdleCallbacks);
+    for (const [id, { cb, opts }] of entries) {
+      try {
+        const nativeId = _requestIdleCallback((deadline) => {
+          mapDelete(rescheduledIdleCallbacks, id);
+          cb(deadline);
+        }, opts);
+        mapSet(rescheduledIdleCallbacks, id, nativeId);
+      } catch (e) {}
+    }
   }
 
   // ---- setInterval shadowing ----
@@ -218,33 +267,81 @@
   // directly, same as setTimeout already does.
   const pendingIntervals = new Map(); // synthetic id -> { fn, args, delay }
   let intervalSeq = ((Math.random() * 0x3FFFFFFF) | 0) + 0x50000000;
+  // synthetic id -> native id, for entries that have been drained (promoted
+  // to a real native setInterval) — mirrors rescheduledTimers/rescheduledRaf
+  // so shadowedClearInterval can still cancel them once drained.
+  const rescheduledIntervals = new Map();
 
   function shadowedSetInterval(fn, delay, ...args) {
-    if (isHidden() && jsThrottleEnabled && typeof fn === 'function') {
-      const id = ++intervalSeq;
-      pendingIntervals.set(id, { fn, args, delay });
-      return id;
+    if (isHidden() && jsThrottleEnabled) {
+      const callable = toCallable(fn);
+      if (callable) {
+        const id = ++intervalSeq;
+        mapSet(pendingIntervals, id, { fn: callable, args, delay });
+        return id;
+      }
     }
     return _setInterval(fn, delay, ...args);
   }
 
   function shadowedClearInterval(id) {
-    if (pendingIntervals.delete(id)) return;
+    if (mapDelete(pendingIntervals, id)) return;
+    if (mapHas(rescheduledIntervals, id)) {
+      _clearInterval(mapGet(rescheduledIntervals, id));
+      mapDelete(rescheduledIntervals, id);
+      return;
+    }
     return _clearInterval(id);
   }
 
   function drainPendingIntervals() {
     if (pendingIntervals.size === 0) return;
-    const entries = Array.from(pendingIntervals.values());
-    pendingIntervals.clear();
-    for (const { fn, args, delay } of entries) {
-      try { _setInterval(fn, delay, ...args); } catch (e) {}
+    const entries = _arrayFrom(mapEntries(pendingIntervals));
+    mapClear(pendingIntervals);
+    for (const [id, { fn, args, delay }] of entries) {
+      try {
+        const nativeId = _setInterval(fn, delay, ...args);
+        mapSet(rescheduledIntervals, id, nativeId);
+      } catch (e) {}
     }
   }
+
+  // toString spoofing: without this, `window.setTimeout.toString()` on a
+  // hidden+throttled tab would reveal the shadow function's real source
+  // instead of a native-code stub, trivially exposing the extension's
+  // presence to page script.
+  function spoofNative(fn, name) {
+    fn.toString = () => `function ${name}() { [native code] }`;
+    return fn;
+  }
+  spoofNative(shadowedSetTimeout, 'setTimeout');
+  spoofNative(shadowedClearTimeout, 'clearTimeout');
+  spoofNative(shadowedRequestAnimationFrame, 'requestAnimationFrame');
+  spoofNative(shadowedCancelAnimationFrame, 'cancelAnimationFrame');
+  spoofNative(shadowedSetInterval, 'setInterval');
+  spoofNative(shadowedClearInterval, 'clearInterval');
+  spoofNative(shadowedRequestIdleCallback, 'requestIdleCallback');
+  spoofNative(shadowedCancelIdleCallback, 'cancelIdleCallback');
+
+  // Whatever was on window.* immediately before we installed our shadows —
+  // may be a third-party library's own wrapper (Zone.js, Sentry, etc.), not
+  // necessarily the bare native. Saved on install, restored on remove, so a
+  // library wrapper installed while the tab was visible survives a
+  // hide→throttle→refocus cycle instead of being silently discarded.
+  let savedSetTimeout, savedClearTimeout, savedRAF, savedCAF,
+      savedSetInterval, savedClearInterval, savedRIC, savedCIC;
 
   function installOverrides() {
     if (active) return;
     active = true;
+    savedSetTimeout   = window.setTimeout;
+    savedClearTimeout = window.clearTimeout;
+    savedRAF          = window.requestAnimationFrame;
+    savedCAF          = window.cancelAnimationFrame;
+    savedSetInterval  = window.setInterval;
+    savedClearInterval = window.clearInterval;
+    savedRIC           = window.requestIdleCallback;
+    savedCIC            = window.cancelIdleCallback;
     window.setTimeout            = shadowedSetTimeout;
     window.clearTimeout          = shadowedClearTimeout;
     window.requestAnimationFrame = shadowedRequestAnimationFrame;
@@ -258,14 +355,14 @@
   function removeOverrides() {
     if (!active) return;
     active = false;
-    window.setTimeout            = _setTimeout;
-    window.clearTimeout          = _clearTimeout;
-    window.requestAnimationFrame = _requestAnimationFrame;
-    window.cancelAnimationFrame  = _cancelAnimationFrame;
-    window.setInterval           = _setInterval;
-    window.clearInterval         = _clearInterval;
-    window.requestIdleCallback   = _requestIdleCallback;
-    window.cancelIdleCallback    = _cancelIdleCallback;
+    window.setTimeout            = savedSetTimeout;
+    window.clearTimeout          = savedClearTimeout;
+    window.requestAnimationFrame = savedRAF;
+    window.cancelAnimationFrame  = savedCAF;
+    window.setInterval           = savedSetInterval;
+    window.clearInterval         = savedClearInterval;
+    window.requestIdleCallback   = savedRIC;
+    window.cancelIdleCallback    = savedCIC;
   }
 
   // Install overrides only while throttling AND hidden (mirrors the old
@@ -293,8 +390,8 @@
   window.addEventListener('message', (e) => {
     if (e.source !== window) return;
     const d = e.data;
-    if (!d || d.__ptfy !== MSG_TAG) return;
-    jsThrottleEnabled = !!d.jsThrottleEnabled;
+    if (!d || !_hasOwnProperty.call(d, '__ptfy') || d.__ptfy !== MSG_TAG) return;
+    jsThrottleEnabled = _hasOwnProperty.call(d, 'jsThrottleEnabled') && !!d.jsThrottleEnabled;
     sync();
   });
 })();

@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "minimum_chrome_version": "121",
   "name": "Potatofy",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Reclaims RAM and bandwidth on Raspberry Pi and low-spec hardware. Blocks trackers, suspends idle tabs, freezes timers, kills bloat.",
   "homepage_url": "https://funnykid7.github.io/Potatofy-extension/",
   "permissions": [
@@ -17,7 +17,7 @@
   ],
   "host_permissions": ["<all_urls>"],
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self';"
+    "extension_pages": "script-src 'self'; object-src 'self';" 
   },
   "background": {
     "service_worker": "service-worker.js",

@@ -34,23 +34,25 @@ rm -f "${ZIP}"
 # Unpacked installs need the tag so the diagnostics button works; the packaged
 # ZIP excludes tests.js, so the tag would produce a broken resource reference
 # that CWS review automation flags as a policy violation.
-cp popup/popup.html popup/popup.html.orig
-# Guard with `[ -f ... ] && ...` and the trailing `|| true`: on the normal
-# success path popup.html.orig has already been moved back by the explicit
-# `mv` below, so this trap's own mv would fail with .orig missing — and
-# under `set -e`, a failing command inside a trap makes the WHOLE script
-# report a non-zero exit code even though the build fully succeeded. The
-# `|| true` keeps the trap a no-op (exit 0) whenever there's nothing to
-# restore, while still protecting the interrupted/failed-mid-build case.
-trap '{ [ -f popup/popup.html.orig ] && mv popup/popup.html.orig popup/popup.html; } || true' EXIT
+#
+# The stripped popup.html is produced in a throwaway staging directory rather
+# than by editing popup/popup.html in place: the working tree's popup.html is
+# never modified, so a hard kill (e.g. `kill -9`, OOM-kill, power loss) at any
+# point during the build cannot leave it corrupted. Only the disposable
+# staging dir is at risk, and it's recreated from source on the next run.
+STAGE="$(mktemp -d)"
+trap 'rm -rf "${STAGE}"' EXIT
+OUTDIR="$(pwd)"
+
+cp -R "${MANIFEST}" content-script.js main-throttle.js service-worker.js icons popup lib rules "${STAGE}/"
 python3 -c "
-with open('popup/popup.html') as f:
+with open('${STAGE}/popup/popup.html') as f:
     lines = f.readlines()
-with open('popup/popup.html', 'w') as f:
+with open('${STAGE}/popup/popup.html', 'w') as f:
     f.writelines(l for l in lines if 'tests.js' not in l)
 "
 
-zip -r "${ZIP}" \
+(cd "${STAGE}" && zip -r "${OUTDIR}/${ZIP}" \
   "${MANIFEST}" \
   content-script.js \
   main-throttle.js \
@@ -61,9 +63,7 @@ zip -r "${ZIP}" \
   rules/ \
   -x "*/.*" \
   -x "popup/tests.js" \
-  -x "*.orig"
-
-mv popup/popup.html.orig popup/popup.html
+  -x "*.orig")
 
 echo ""
 echo "Contents:"

@@ -95,11 +95,11 @@ Settings sync via `chrome.storage.sync` (opt-in, off by default); counters live 
 |---|---|
 | `tabs` | Read tab URL and activity state for idle-tab suspension and popup hostname display. No tab content is accessed. |
 | `storage` | Persist settings (`local`) and stats (`local`). Optionally mirror feature toggles to `sync` if the user opts in. |
-| `alarms` | Periodic checks for idle-tab suspension (1 min), memory pressure (30 s), stats flush (15 s), and DNR polling (1 min). |
+| `alarms` | Periodic checks for idle-tab suspension (1 min), memory pressure (1 min), stats flush (1 min), and DNR polling (1 min). |
 | `contentSettings` | Per-site JavaScript and image blocking for the "Kill JS here" / "Kill images here" popup buttons. No other content setting is touched. |
 | `declarativeNetRequest` | Static block rules (trackers, ads, font CDNs) and dynamic whitelist allow-rules. All rules ship in the extension — no remote fetch. |
 | `declarativeNetRequestFeedback` | Polls `getMatchedRules()` once per minute to count blocked requests for popup statistics. Only rule IDs and timestamps are read — no request URLs or page content. |
-| `system.memory` | Reads free RAM every 30 s for the memory-pressure auto-discard path. Not stored or transmitted. |
+| `system.memory` | Reads free RAM every 1 min for the memory-pressure auto-discard path. Not stored or transmitted. |
 | `windows` | Iterates open windows when discarding idle tabs to correctly skip the active tab in each window. |
 | `host_permissions: <all_urls>` | Required for (1) declarative blocking rules that must apply to all domains, and (2) the MAIN-world content script that overrides `window.setTimeout` / `window.requestAnimationFrame` to freeze background timers. |
 
