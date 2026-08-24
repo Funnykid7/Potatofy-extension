@@ -953,7 +953,7 @@ async function setPotatoSite(host, opts) {
   // QA-02 — read + modify + write atomically under the settings lock so a
   // concurrent UPDATE_SETTINGS can't clobber this per-site change (or vice-versa).
   // saveSettingsLocked (not saveSettings) avoids re-entering the held lock.
-  await withLock('settings', async () => {
+  const applied = await withLock('settings', async () => {
     const settings = await getSettings();
     const sites = { ...(settings.potatoSites || {}) };
     const current = sites[cleanHost] || { js: false, img: false };
@@ -961,11 +961,18 @@ async function setPotatoSite(host, opts) {
       js:  opts.js  !== undefined ? !!opts.js  : current.js,
       img: opts.img !== undefined ? !!opts.img : current.img
     };
+    // BUG-2 — enforce the MAX_POTATO_SITES cap on this path too (previously
+    // only validateSettings() checked it); only blocks adding a genuinely
+    // new host, never an edit to one already present.
+    if (!(cleanHost in sites) && Object.keys(sites).length >= MAX_POTATO_SITES) return false;
     if (!next.js && !next.img) delete sites[cleanHost];
     else sites[cleanHost] = next;
     settings.potatoSites = sites;
     await saveSettingsLocked(settings);
+    return true;
   });
+
+  if (!applied) return false;
 
   // QA-05 — reconcile contentSettings (clear-all + re-apply only active blocks)
   // under the same 'dnr' lock the other sync paths (bootstrap, UPDATE_SETTINGS)
