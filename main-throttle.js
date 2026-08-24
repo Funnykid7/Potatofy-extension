@@ -268,23 +268,27 @@
   // native cadence regardless of throttling, bypassing the JS-throttle
   // feature for one of the most common background-polling patterns. Mirrors
   // shadowedSetTimeout's scope for intervals CREATED while hidden
-  // (pendingIntervals/rescheduledIntervals below). An interval created while
-  // visible is armed as a real native interval right away, but is tracked in
-  // activeIntervals so that if the tab is later hidden, sync() can pause it
-  // (clear the native timer, keep the bookkeeping) and resume it on
-  // refocus — instead of letting it run at full native cadence forever in
-  // the background, which used to defeat the throttle for this case.
+  // (pendingIntervals below, drained into activeIntervals — see
+  // drainPendingIntervals). An interval created while visible is armed as a
+  // real native interval right away, but is tracked in activeIntervals so
+  // that if the tab is later hidden, sync() can pause it (clear the native
+  // timer, keep the bookkeeping) and resume it on refocus — instead of
+  // letting it run at full native cadence forever in the background, which
+  // used to defeat the throttle for this case. An interval created while
+  // hidden goes through the same activeIntervals pause/resume path once
+  // drained, so a SECOND hide/show cycle pauses it too, not just the first.
   const pendingIntervals = new Map(); // synthetic id -> { fn, args, delay }
   let intervalSeq = ((Math.random() * 0x3FFFFFFF) | 0) + 0x50000000;
-  // synthetic id -> native id, for entries that have been drained (promoted
-  // to a real native setInterval) — mirrors rescheduledTimers/rescheduledRaf
-  // so shadowedClearInterval can still cancel them once drained.
-  const rescheduledIntervals = new Map();
   const MAX_PENDING_INTERVALS = 2000;
 
   // returnedId -> { fn, args, delay, nativeId }. nativeId is null while
-  // paused (tab hidden); the map key (nativeId at creation time) is what
-  // the page holds onto and passes to clearInterval, so it must never change.
+  // paused (tab hidden); the map key is whatever id the page holds onto and
+  // passes to clearInterval — the native id at creation time for an
+  // interval created while visible, or the original synthetic id for one
+  // drained out of pendingIntervals (drainPendingIntervals mints a NEW
+  // native id on drain, but the page still only knows the synthetic one) —
+  // so the key must never change after insertion, even though the nativeId
+  // field inside the entry does (on pause/resume, and on drain).
   const activeIntervals = new Map();
   const MAX_ACTIVE_INTERVALS = 2000;
 
@@ -312,11 +316,6 @@
 
   function shadowedClearInterval(id) {
     if (mapDelete(pendingIntervals, id)) return;
-    if (mapHas(rescheduledIntervals, id)) {
-      _clearInterval(mapGet(rescheduledIntervals, id));
-      mapDelete(rescheduledIntervals, id);
-      return;
-    }
     if (mapHas(activeIntervals, id)) {
       const entry = mapGet(activeIntervals, id);
       if (entry.nativeId !== null) _clearInterval(entry.nativeId);
@@ -332,8 +331,20 @@
     mapClear(pendingIntervals);
     for (const [id, { fn, args, delay }] of entries) {
       try {
+        // Mints a NEW native id (distinct from the synthetic `id` the page
+        // holds) — same shape as a visible-creation entry, just keyed by the
+        // synthetic id instead of the (here, irrelevant to the page) native
+        // one. Registering into activeIntervals rather than a separate
+        // rescheduled-only map means pauseActiveIntervals/resumeActiveIntervals
+        // (walked from sync() on every hide/show, not just the first) pick
+        // this interval up on every subsequent cycle, and
+        // shadowedClearInterval keeps a single lookup path for it after drain.
         const nativeId = _setInterval(fn, delay, ...args);
-        mapSet(rescheduledIntervals, id, nativeId);
+        mapSet(activeIntervals, id, { fn, args, delay, nativeId });
+        if (activeIntervals.size > MAX_ACTIVE_INTERVALS) {
+          const oldest = mapKeys(activeIntervals).next().value;
+          mapDelete(activeIntervals, oldest);
+        }
       } catch (e) {}
     }
   }
@@ -366,11 +377,16 @@
     }
   }
 
-  // toString spoofing: without this, `window.setTimeout.toString()` on a
-  // hidden+throttled tab would reveal the shadow function's real source
-  // instead of a native-code stub, trivially exposing the extension's
-  // presence to page script.
+  // toString/name spoofing: without this, `window.setTimeout.toString()` (or
+  // `.name`) on a hidden+throttled tab would reveal the shadow function's
+  // real source/identifier instead of matching a native-code stub, trivially
+  // exposing the extension's presence to page script. setInterval/
+  // clearInterval are installed for the whole page lifetime whenever
+  // throttling is on (not just while hidden — see installIntervalOverrides
+  // below), so `.name` alone is enough to detect this extension on any page,
+  // any time, if left unspoofed.
   function spoofNative(fn, name) {
+    Object.defineProperty(fn, 'name', { value: name, configurable: true });
     fn.toString = () => `function ${name}() { [native code] }`;
     return fn;
   }
