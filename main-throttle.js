@@ -387,6 +387,11 @@
   // any time, if left unspoofed.
   function spoofNative(fn, name) {
     Object.defineProperty(fn, 'name', { value: name, configurable: true });
+    // Native timer functions all report .length === 1 (one required arg),
+    // regardless of how many params the real implementation accepts — the
+    // shadow functions' real JS param counts (e.g. shadowedSetInterval's 2)
+    // would otherwise be a detectable mismatch against window.setInterval.length.
+    Object.defineProperty(fn, 'length', { value: 1, configurable: true });
     fn.toString = () => `function ${name}() { [native code] }`;
     return fn;
   }

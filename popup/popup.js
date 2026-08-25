@@ -615,9 +615,10 @@ function bindSiteActions() {
     const nextJs = !current.js;
     els.killJsBtn.disabled = true;
     try {
-      await chrome.runtime.sendMessage({
+      const reply = await chrome.runtime.sendMessage({
         type: 'TOGGLE_POTATO_SITE', host: currentHostname, js: nextJs
       });
+      if (!reply || !reply.ok) throw new Error('save failed');
       // Optimistically update in-memory state instead of loadSettings(),
       // which re-reads chrome.storage.local and could race the SW's async
       // write — briefly flashing the pre-toggle state back before the
@@ -641,9 +642,10 @@ function bindSiteActions() {
     const nextImg = !current.img;
     els.killImgBtn.disabled = true;
     try {
-      await chrome.runtime.sendMessage({
+      const reply = await chrome.runtime.sendMessage({
         type: 'TOGGLE_POTATO_SITE', host: currentHostname, img: nextImg
       });
+      if (!reply || !reply.ok) throw new Error('save failed');
       const sites = { ...(currentSettings.potatoSites || {}) };
       const next = { js: current.js, img: nextImg };
       if (!next.js && !next.img) delete sites[currentHostname];
