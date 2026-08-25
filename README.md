@@ -52,10 +52,10 @@ Features are split into two sections in the popup:
 
 | Setting | What it does |
 |---|---|
-| Block trackers & ads | Network-layer block of ~250 tracker, ad, and font CDN domains. |
+| Block trackers & ads | Network-layer block of 190 tracker, ad, and font CDN domains. |
 | Auto-suspend idle tabs | Discards tabs after a configurable idle window (1–30 min). Skips pinned, audible, and active tabs. |
 | Memory-pressure auto-discard | If free RAM drops below a threshold (default 500 MB), force-discards idle tabs immediately. |
-| Freeze background JS | Stubs `setTimeout` and `requestAnimationFrame` on hidden tabs. `setInterval` is intentionally left running so repeating polling loops (webmail refresh, chat heartbeats, etc.) keep working. |
+| Freeze background JS | Shadows `setTimeout`, `requestAnimationFrame`, `setInterval`, and `requestIdleCallback` on hidden tabs — intervals are paused too, even ones started while visible. Everything resumes on tab focus. |
 | Pause background videos | Pauses `<video>` and drops `preload` when a tab becomes hidden. Restores on tab focus. |
 | Lazy-load images | Adds `loading="lazy"`, `decoding="async"`, and `fetchpriority="low"` to images and iframes. |
 | Kill CSS animations | Site-wide style override collapsing animation and transition durations to near-zero. |
