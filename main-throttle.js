@@ -223,11 +223,16 @@
   // rescheduledTimers/rescheduledRaf so shadowedCancelIdleCallback can still
   // cancel them through that window.
   const rescheduledIdleCallbacks = new Map();
+  const MAX_PENDING_IDLE_CALLBACKS = 240;
 
   function shadowedRequestIdleCallback(cb, opts) {
     if (isHidden() && jsThrottleEnabled && typeof cb === 'function') {
       const id = ++idleSeq;
       mapSet(pendingIdleCallbacks, id, { cb, opts });
+      if (pendingIdleCallbacks.size > MAX_PENDING_IDLE_CALLBACKS) {
+        const oldest = mapKeys(pendingIdleCallbacks).next().value;
+        mapDelete(pendingIdleCallbacks, oldest);
+      }
       return id;
     }
     return _requestIdleCallback(cb, opts);
@@ -262,15 +267,30 @@
   // Previously entirely unshadowed: any interval a page created ran on its
   // native cadence regardless of throttling, bypassing the JS-throttle
   // feature for one of the most common background-polling patterns. Mirrors
-  // shadowedSetTimeout's scope: only intervals CREATED while hidden +
-  // throttled are captured; one created while visible uses the native timer
-  // directly, same as setTimeout already does.
+  // shadowedSetTimeout's scope for intervals CREATED while hidden
+  // (pendingIntervals below, drained into activeIntervals — see
+  // drainPendingIntervals). An interval created while visible is armed as a
+  // real native interval right away, but is tracked in activeIntervals so
+  // that if the tab is later hidden, sync() can pause it (clear the native
+  // timer, keep the bookkeeping) and resume it on refocus — instead of
+  // letting it run at full native cadence forever in the background, which
+  // used to defeat the throttle for this case. An interval created while
+  // hidden goes through the same activeIntervals pause/resume path once
+  // drained, so a SECOND hide/show cycle pauses it too, not just the first.
   const pendingIntervals = new Map(); // synthetic id -> { fn, args, delay }
   let intervalSeq = ((Math.random() * 0x3FFFFFFF) | 0) + 0x50000000;
-  // synthetic id -> native id, for entries that have been drained (promoted
-  // to a real native setInterval) — mirrors rescheduledTimers/rescheduledRaf
-  // so shadowedClearInterval can still cancel them once drained.
-  const rescheduledIntervals = new Map();
+  const MAX_PENDING_INTERVALS = 2000;
+
+  // returnedId -> { fn, args, delay, nativeId }. nativeId is null while
+  // paused (tab hidden); the map key is whatever id the page holds onto and
+  // passes to clearInterval — the native id at creation time for an
+  // interval created while visible, or the original synthetic id for one
+  // drained out of pendingIntervals (drainPendingIntervals mints a NEW
+  // native id on drain, but the page still only knows the synthetic one) —
+  // so the key must never change after insertion, even though the nativeId
+  // field inside the entry does (on pause/resume, and on drain).
+  const activeIntervals = new Map();
+  const MAX_ACTIVE_INTERVALS = 2000;
 
   function shadowedSetInterval(fn, delay, ...args) {
     if (isHidden() && jsThrottleEnabled) {
@@ -278,17 +298,28 @@
       if (callable) {
         const id = ++intervalSeq;
         mapSet(pendingIntervals, id, { fn: callable, args, delay });
+        if (pendingIntervals.size > MAX_PENDING_INTERVALS) {
+          const oldest = mapKeys(pendingIntervals).next().value;
+          mapDelete(pendingIntervals, oldest);
+        }
         return id;
       }
     }
-    return _setInterval(fn, delay, ...args);
+    const nativeId = _setInterval(fn, delay, ...args);
+    mapSet(activeIntervals, nativeId, { fn, args, delay, nativeId });
+    if (activeIntervals.size > MAX_ACTIVE_INTERVALS) {
+      const oldest = mapKeys(activeIntervals).next().value;
+      mapDelete(activeIntervals, oldest);
+    }
+    return nativeId;
   }
 
   function shadowedClearInterval(id) {
     if (mapDelete(pendingIntervals, id)) return;
-    if (mapHas(rescheduledIntervals, id)) {
-      _clearInterval(mapGet(rescheduledIntervals, id));
-      mapDelete(rescheduledIntervals, id);
+    if (mapHas(activeIntervals, id)) {
+      const entry = mapGet(activeIntervals, id);
+      if (entry.nativeId !== null) _clearInterval(entry.nativeId);
+      mapDelete(activeIntervals, id);
       return;
     }
     return _clearInterval(id);
@@ -300,17 +331,67 @@
     mapClear(pendingIntervals);
     for (const [id, { fn, args, delay }] of entries) {
       try {
+        // Mints a NEW native id (distinct from the synthetic `id` the page
+        // holds) — same shape as a visible-creation entry, just keyed by the
+        // synthetic id instead of the (here, irrelevant to the page) native
+        // one. Registering into activeIntervals rather than a separate
+        // rescheduled-only map means pauseActiveIntervals/resumeActiveIntervals
+        // (walked from sync() on every hide/show, not just the first) pick
+        // this interval up on every subsequent cycle, and
+        // shadowedClearInterval keeps a single lookup path for it after drain.
         const nativeId = _setInterval(fn, delay, ...args);
-        mapSet(rescheduledIntervals, id, nativeId);
+        mapSet(activeIntervals, id, { fn, args, delay, nativeId });
+        if (activeIntervals.size > MAX_ACTIVE_INTERVALS) {
+          const oldest = mapKeys(activeIntervals).next().value;
+          mapDelete(activeIntervals, oldest);
+        }
       } catch (e) {}
     }
   }
 
-  // toString spoofing: without this, `window.setTimeout.toString()` on a
-  // hidden+throttled tab would reveal the shadow function's real source
-  // instead of a native-code stub, trivially exposing the extension's
-  // presence to page script.
+  // Pauses intervals that were created (and left running) while the tab was
+  // visible — see activeIntervals above. Called from sync() right before a
+  // hide+throttle transition: clears each one's native timer but keeps the
+  // map entry (nativeId set to null) so shadowedClearInterval can still find
+  // it by the page's id, and resumeActiveIntervals() can re-arm it later.
+  function pauseActiveIntervals() {
+    for (const [, entry] of mapEntries(activeIntervals)) {
+      if (entry.nativeId !== null) {
+        _clearInterval(entry.nativeId);
+        entry.nativeId = null;
+      }
+    }
+  }
+
+  // Re-arms intervals paused by pauseActiveIntervals() when the tab is shown
+  // again. Interval semantics have no "remaining time" to preserve, so resume
+  // simply starts a fresh native interval at full `delay` — same cadence as
+  // when the interval was first created.
+  function resumeActiveIntervals() {
+    for (const [, entry] of mapEntries(activeIntervals)) {
+      if (entry.nativeId === null) {
+        try {
+          entry.nativeId = _setInterval(entry.fn, entry.delay, ...entry.args);
+        } catch (e) {}
+      }
+    }
+  }
+
+  // toString/name spoofing: without this, `window.setTimeout.toString()` (or
+  // `.name`) on a hidden+throttled tab would reveal the shadow function's
+  // real source/identifier instead of matching a native-code stub, trivially
+  // exposing the extension's presence to page script. setInterval/
+  // clearInterval are installed for the whole page lifetime whenever
+  // throttling is on (not just while hidden — see installIntervalOverrides
+  // below), so `.name` alone is enough to detect this extension on any page,
+  // any time, if left unspoofed.
   function spoofNative(fn, name) {
+    Object.defineProperty(fn, 'name', { value: name, configurable: true });
+    // Native timer functions all report .length === 1 (one required arg),
+    // regardless of how many params the real implementation accepts — the
+    // shadow functions' real JS param counts (e.g. shadowedSetInterval's 2)
+    // would otherwise be a detectable mismatch against window.setInterval.length.
+    Object.defineProperty(fn, 'length', { value: 1, configurable: true });
     fn.toString = () => `function ${name}() { [native code] }`;
     return fn;
   }
@@ -328,8 +409,7 @@
   // necessarily the bare native. Saved on install, restored on remove, so a
   // library wrapper installed while the tab was visible survives a
   // hide→throttle→refocus cycle instead of being silently discarded.
-  let savedSetTimeout, savedClearTimeout, savedRAF, savedCAF,
-      savedSetInterval, savedClearInterval, savedRIC, savedCIC;
+  let savedSetTimeout, savedClearTimeout, savedRAF, savedCAF, savedRIC, savedCIC;
 
   function installOverrides() {
     if (active) return;
@@ -338,16 +418,12 @@
     savedClearTimeout = window.clearTimeout;
     savedRAF          = window.requestAnimationFrame;
     savedCAF          = window.cancelAnimationFrame;
-    savedSetInterval  = window.setInterval;
-    savedClearInterval = window.clearInterval;
     savedRIC           = window.requestIdleCallback;
     savedCIC            = window.cancelIdleCallback;
     window.setTimeout            = shadowedSetTimeout;
     window.clearTimeout          = shadowedClearTimeout;
     window.requestAnimationFrame = shadowedRequestAnimationFrame;
     window.cancelAnimationFrame  = shadowedCancelAnimationFrame;
-    window.setInterval           = shadowedSetInterval;
-    window.clearInterval         = shadowedClearInterval;
     window.requestIdleCallback   = shadowedRequestIdleCallback;
     window.cancelIdleCallback    = shadowedCancelIdleCallback;
   }
@@ -359,20 +435,54 @@
     window.clearTimeout          = savedClearTimeout;
     window.requestAnimationFrame = savedRAF;
     window.cancelAnimationFrame  = savedCAF;
-    window.setInterval           = savedSetInterval;
-    window.clearInterval         = savedClearInterval;
     window.requestIdleCallback   = savedRIC;
     window.cancelIdleCallback    = savedCIC;
   }
 
-  // Install overrides only while throttling AND hidden (mirrors the old
-  // applyThrottle/restoreOriginals-on-visibility behavior — native timers when
-  // visible). Always drain any queued work once the tab is visible again OR
-  // once throttling itself was just turned off — previously queued timers
-  // stayed stranded in memory if the user disabled the throttle feature while
-  // the tab was still hidden.
+  // setInterval/clearInterval have a DIFFERENT install lifecycle than the
+  // group above: an already-running interval can only be paused/resumed (see
+  // activeIntervals) if shadowedSetInterval/shadowedClearInterval are already
+  // installed at the moment the page CREATES it — which may be while the tab
+  // is still visible (installOverrides() above only installs while hidden).
+  // So these two are installed/removed whenever jsThrottleEnabled changes,
+  // independent of visibility, while setTimeout/rAF/idle-callback keep the
+  // hidden-only gating (they don't need pause/resume — a one-shot timer or
+  // frame callback just runs to completion, or gets queued, same as before).
+  let intervalOverridesActive = false;
+  let savedSetInterval, savedClearInterval;
+
+  function installIntervalOverrides() {
+    if (intervalOverridesActive) return;
+    intervalOverridesActive = true;
+    savedSetInterval   = window.setInterval;
+    savedClearInterval = window.clearInterval;
+    window.setInterval   = shadowedSetInterval;
+    window.clearInterval = shadowedClearInterval;
+  }
+
+  function removeIntervalOverrides() {
+    if (!intervalOverridesActive) return;
+    intervalOverridesActive = false;
+    window.setInterval   = savedSetInterval;
+    window.clearInterval = savedClearInterval;
+  }
+
+  // setTimeout/rAF/idle-callback overrides install only while throttling AND
+  // hidden (mirrors the old applyThrottle/restoreOriginals-on-visibility
+  // behavior — native timers when visible); setInterval/clearInterval
+  // install/remove on jsThrottleEnabled alone, independent of hidden (see
+  // installIntervalOverrides above). Always drain any queued work once the
+  // tab is visible again OR once throttling itself was just turned off —
+  // previously queued timers stayed stranded in memory if the user disabled
+  // the throttle feature while the tab was still hidden.
   function sync() {
+    if (jsThrottleEnabled) {
+      installIntervalOverrides();
+    } else {
+      removeIntervalOverrides();
+    }
     if (jsThrottleEnabled && isHidden()) {
+      pauseActiveIntervals();
       installOverrides();
     } else {
       removeOverrides();
@@ -381,6 +491,7 @@
         drainPendingRaf();
         drainPendingIntervals();
         drainPendingIdleCallbacks();
+        resumeActiveIntervals();
       }
     }
   }

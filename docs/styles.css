@@ -569,6 +569,8 @@ code, .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; 
 .bento .card:nth-child(6) { grid-column: span 6; }
 .bento .card:nth-child(7) { grid-column: span 6; }
 .bento .card:nth-child(8) { grid-column: span 6; }
+.bento .card:nth-child(9) { grid-column: span 6; }
+.bento .card:nth-child(10) { grid-column: span 6; }
 
 /* Maximum savings bento: wide+narrow, narrow+wide, full */
 .bento-max .card:nth-child(1) { grid-column: span 8; }
@@ -677,6 +679,18 @@ code, .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; 
 .seg-gpu  { background: var(--gpu-color); }
 .seg-rend { background: var(--rend-color); color: #042033; }
 .seg-brow { background: var(--brow-color); color: #240a3a; }
+
+/* Precomputed bar-chart proportions (CSP has no unsafe-inline style-src, so
+   these replace the inline style="--total:N" / style="--w:N" attributes). */
+.bar-track--full { width: 100%; }
+.bar-track--w83 { width: 82.65%; }
+
+.seg--w1860 { flex: 1860 0 0; }
+.seg--w1178 { flex: 1178 0 0; }
+.seg--w608  { flex: 608 0 0; }
+.seg--w1181 { flex: 1181 0 0; }
+.seg--w997  { flex: 997 0 0; }
+.seg--w532  { flex: 532 0 0; }
 
 .bars-legend {
   display: flex;

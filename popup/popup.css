@@ -152,7 +152,7 @@ code {
   -webkit-appearance: none;
   cursor: pointer;
 }
-.stats-scope:focus { outline: none; color: var(--accent); }
+.stats-scope:focus { color: var(--accent); }
 
 .popup-stats-chip {
   display: inline-flex;

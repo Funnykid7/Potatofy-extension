@@ -136,7 +136,7 @@ function showToast(msg) {
 }
 
 async function pushSettings() {
-  await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: currentSettings });
+  return await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: currentSettings });
 }
 
 function renderToggles() {
@@ -280,7 +280,8 @@ function renderWhitelistList() {
       const prev = currentSettings.whitelist || [];
       try {
         currentSettings.whitelist = prev.filter(h => h !== host);
-        await pushSettings();
+        const reply = await pushSettings();
+        if (!reply || !reply.ok) throw new Error('save failed');
         renderAll();
       } catch (e) {
         // Revert — otherwise the row visually disappears even though the SW
@@ -460,7 +461,8 @@ function bindToggles() {
       // overlapping UPDATE_SETTINGS calls whose responses land out of order.
       el.disabled = true;
       try {
-        await pushSettings();
+        const reply = await pushSettings();
+        if (!reply || !reply.ok) throw new Error('save failed');
       } catch (e) {
         currentSettings[key] = prev;
         currentSettings.syncHostsToCloud = prevSyncHostsToCloud;
@@ -480,7 +482,8 @@ function bindSuspendControls() {
     currentSettings.idleThresholdMinutes = ALLOWED_THRESHOLDS.includes(v) ? v : 5;
     els.threshold.disabled = true;
     try {
-      await pushSettings();
+      const reply = await pushSettings();
+      if (!reply || !reply.ok) throw new Error('save failed');
     } catch (e) {
       currentSettings.idleThresholdMinutes = prev;
       renderAll();
@@ -496,7 +499,8 @@ function bindSuspendControls() {
     currentSettings.memoryPressureThresholdMB = ALLOWED_PRESSURE_MB.includes(v) ? v : 500;
     els.pressureThresh.disabled = true;
     try {
-      await pushSettings();
+      const reply = await pushSettings();
+      if (!reply || !reply.ok) throw new Error('save failed');
     } catch (e) {
       currentSettings.memoryPressureThresholdMB = prev;
       renderAll();
@@ -552,7 +556,8 @@ function bindSiteActions() {
     // renderWhitelistButton re-enables when renderAll runs.
     els.whitelistBtn.disabled = true;
     try {
-      await pushSettings();
+      const reply = await pushSettings();
+      if (!reply || !reply.ok) throw new Error('save failed');
       renderAll();
     } catch (e) {
       currentSettings.whitelist = prevList;
@@ -610,9 +615,10 @@ function bindSiteActions() {
     const nextJs = !current.js;
     els.killJsBtn.disabled = true;
     try {
-      await chrome.runtime.sendMessage({
+      const reply = await chrome.runtime.sendMessage({
         type: 'TOGGLE_POTATO_SITE', host: currentHostname, js: nextJs
       });
+      if (!reply || !reply.ok) throw new Error('save failed');
       // Optimistically update in-memory state instead of loadSettings(),
       // which re-reads chrome.storage.local and could race the SW's async
       // write — briefly flashing the pre-toggle state back before the
@@ -636,9 +642,10 @@ function bindSiteActions() {
     const nextImg = !current.img;
     els.killImgBtn.disabled = true;
     try {
-      await chrome.runtime.sendMessage({
+      const reply = await chrome.runtime.sendMessage({
         type: 'TOGGLE_POTATO_SITE', host: currentHostname, img: nextImg
       });
+      if (!reply || !reply.ok) throw new Error('save failed');
       const sites = { ...(currentSettings.potatoSites || {}) };
       const next = { js: current.js, img: nextImg };
       if (!next.js && !next.img) delete sites[currentHostname];
@@ -872,6 +879,7 @@ function bindAllOnce() {
 // privacy modal) re-runs the init sequence instead of getting stuck
 // half-initialized forever.
 let _initPromise = null;
+let _statsPollTimer = null;
 async function initPopup() {
   if (_initPromise) return _initPromise;
   _initPromise = (async () => {
@@ -894,7 +902,7 @@ async function initPopup() {
     // Justifies the pulsing "live" badge on the stats card — without a poll
     // loop, displayed numbers only updated on the SW's own ~60s flush cadence
     // (or a manual action), which could lag well behind "live".
-    setInterval(refreshStats, 3000);
+    if (!_statsPollTimer) _statsPollTimer = setInterval(refreshStats, 3000);
     await refreshBoostState();
   })();
   try {
